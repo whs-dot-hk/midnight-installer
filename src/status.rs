@@ -148,6 +148,36 @@ pub async fn report(settings: &CommonSettings) -> String {
         },
     }
 
+    // Installing no longer waits on these, so this is where an operator finds out whether
+    // the host has actually caught up, and how far off it is if not
+    let _ = writeln!(buf, "\n===== READINESS =====");
+    match crate::check::require_cardano_synced(settings).await {
+        Ok(tip) => {
+            let _ = writeln!(buf, "[OK]   The relay is synced ({}%)", tip.sync_progress);
+        },
+        Err(e) => {
+            let _ = writeln!(buf, "[WAIT] {e}");
+        },
+    }
+    match crate::credentials::DatabaseCredentials::load(&paths.postgres_credentials_file).await {
+        Ok(credentials) => {
+            match crate::check::require_db_sync_near_tip(settings, &credentials).await {
+                Ok(lag) => {
+                    let _ = writeln!(buf, "[OK]   db-sync is at the tip ({lag} block(s) behind)");
+                },
+                Err(e) => {
+                    let _ = writeln!(buf, "[WAIT] {e}");
+                },
+            }
+        },
+        Err(_) => {
+            let _ = writeln!(
+                buf,
+                "[WAIT] The database credentials have not been saved yet, so db-sync cannot be checked"
+            );
+        },
+    }
+
     let _ = writeln!(buf, "\n===== RECEIPTS =====");
     match tokio::fs::read_dir(&paths.receipt_dir).await {
         Ok(mut entries) => {

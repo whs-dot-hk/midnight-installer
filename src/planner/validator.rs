@@ -1,25 +1,29 @@
 use anyhow::Context;
 use std::collections::HashMap;
 
-use crate::action::base::{CreateSystemdUnit, StartSystemdUnit};
+use crate::action::base::{CreateSystemdUnit, RequirePaths, StartSystemdUnit};
 use crate::action::midnight::{CreateValidatorEnvFile, PrepareSeedFiles};
 use crate::action::{Action, StatefulAction};
 use crate::credentials::DatabaseCredentials;
-use crate::planner::{diff_from_default, require_root, units, Planner};
+use crate::planner::{diff_from_default, require_root, require_user, units, Planner};
 use crate::settings::{
     CommonSettings, MainChainParams, Secret, DEFAULT_DB_NAME, DEFAULT_DB_USER,
     MIDNIGHT_NODE_SERVICE,
 };
 
 /// The default block beneficiary, as the FNO runbook gives it
-const DEFAULT_SIDECHAIN_BLOCK_BENEFICIARY: &str =
+pub(crate) const DEFAULT_SIDECHAIN_BLOCK_BENEFICIARY: &str =
     "0000000000000000000000000000000000000000000000000000000000000002";
 
 /** Run the Midnight node as a validator
 
-The last stage, and the one with the most prerequisites: the node reads the chain through
-db-sync, so it may not start until db-sync has caught up with the relay, which in turn may
-not have started until the relay was synced.
+The last stage, because it depends on what every other stage produces: the keys, the
+environment, and a database to read the main chain from.
+
+It does not wait for any of them to have caught up. The node follows db-sync, which follows
+the relay, and each of them retries until the one below it has what it needs, so starting
+the validator early costs a while of restarts rather than a broken install. Whether the host
+has actually caught up is a question for `status`, not a reason to refuse to install.
 */
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize, clap::Parser)]
 pub struct Validator {
@@ -125,8 +129,30 @@ impl Planner for Validator {
         let credentials = self.credentials().await?;
         let main_chain = self.main_chain_params()?;
         let node_name = self.node_name()?;
+        let binary =
+            crate::settings::user_bin_dir(&self.common.midnight_user)?.join("midnight-node");
 
         Ok(vec![
+            // Checked here rather than while planning: in a whole-host plan the `midnight`
+            // stage produces these a few actions earlier, so they do not exist yet when this
+            // is planned, only by the time it runs
+            RequirePaths::plan(
+                "what the validator needs",
+                vec![
+                    (binary, String::from("the Midnight node binary")),
+                    (
+                        paths.midnight_chain_spec.clone(),
+                        String::from("the chain spec"),
+                    ),
+                    (
+                        paths.midnight_network_dir.join("secret_ed25519"),
+                        String::from("the Midnight network key"),
+                    ),
+                ],
+                "Run the `midnight` step first.",
+            )
+            .await?
+            .boxed(),
             PrepareSeedFiles::plan(&paths.midnight_keys_dir, &self.common.midnight_user)
                 .await?
                 .boxed(),
@@ -178,45 +204,6 @@ impl Planner for Validator {
 
     async fn pre_install_check(&self) -> anyhow::Result<()> {
         require_root()?;
-
-        let paths = self.common.paths();
-        let binary =
-            crate::settings::user_bin_dir(&self.common.midnight_user)?.join("midnight-node");
-
-        for (path, what) in [
-            (binary, "the Midnight node binary"),
-            (paths.midnight_chain_spec.clone(), "the chain spec"),
-            (
-                paths.midnight_network_dir.join("secret_ed25519"),
-                "the Midnight network key",
-            ),
-        ] {
-            if !path.exists() {
-                anyhow::bail!(
-                    "`{path}` is missing ({what}). Run the `midnight` step first.",
-                    path = path.display(),
-                );
-            }
-        }
-
-        // Everything below the node has to be in place and caught up before it may sign
-        crate::check::require_cardano_synced(&self.common).await?;
-
-        if !crate::action::base::unit_is_active("postgresql").await {
-            anyhow::bail!("PostgreSQL is not running. Run the `db-sync` step first.");
-        }
-
-        let credentials = self.credentials().await?;
-        if !crate::check::postgres_reachable(&credentials).await {
-            anyhow::bail!(
-                "Could not log in to `{name}` as `{user}` with the password given. Run the `db-sync` step first, or pass the right `--postgres-password`.",
-                name = credentials.name,
-                user = credentials.user,
-            );
-        }
-
-        crate::check::require_db_sync_near_tip(&self.common, &credentials).await?;
-
-        Ok(())
+        require_user(&self.common.midnight_user)
     }
 }

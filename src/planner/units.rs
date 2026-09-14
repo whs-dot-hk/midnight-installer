@@ -110,6 +110,10 @@ pub fn midnight_node(settings: &CommonSettings) -> anyhow::Result<String> {
 Description=Midnight Protocol Node ({network} FNO)
 After=network-online.target postgresql.service cardano-db-sync.service
 Wants=network-online.target postgresql.service cardano-db-sync.service
+# The node is started as soon as it is installed, which may be long before db-sync has
+# filled the database it reads. It fails and retries until then, so systemd must not give
+# up on it for restarting too often.
+StartLimitIntervalSec=0
 
 [Service]
 User={user}
