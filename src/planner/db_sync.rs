@@ -18,8 +18,9 @@ use crate::settings::{
 
 /** PostgreSQL and `cardano-db-sync`
 
-This stage refuses to plan until the relay has fully synced: db-sync started against a
-partially synced relay writes a database the Midnight node cannot trust.
+db-sync follows the relay rather than requiring it to have finished: started against a relay
+which is still catching up, it simply follows along behind it. So this stage installs
+whenever it is asked to, and how far along the pair have got is a question for `status`.
 */
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize, clap::Parser)]
 pub struct DbSync {
@@ -144,12 +145,6 @@ impl Planner for DbSync {
 
     async fn pre_install_check(&self) -> anyhow::Result<()> {
         require_root()?;
-        require_user(&self.common.cardano_user)?;
-
-        // The gate the runbook is built around: db-sync must not start before the relay has
-        // caught up
-        crate::check::require_cardano_synced(&self.common).await?;
-
-        Ok(())
+        require_user(&self.common.cardano_user)
     }
 }

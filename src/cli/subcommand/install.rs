@@ -137,6 +137,24 @@ from a flag, from the credentials an earlier stage saved, or from whoever is at 
 */
 pub(crate) async fn resolve_secrets(planner: &mut BuiltinPlanner) -> anyhow::Result<()> {
     match planner {
+        BuiltinPlanner::All(all) if all.postgres_password.is_none() => {
+            let saved = all.common.paths().postgres_credentials_file;
+
+            if let Ok(credentials) = crate::credentials::DatabaseCredentials::load(&saved).await {
+                tracing::info!("Using the database password saved in `{}`", saved.display());
+                all.postgres_password = Some(credentials.password);
+                return Ok(());
+            }
+
+            // Asked once, here, and handed to both the stage which creates the role and the
+            // stage which logs in as it — neither goes looking for a file which the same
+            // plan has not written yet
+            let password = interaction::prompt_new_secret(&format!(
+                "Password for the PostgreSQL role `{}`",
+                all.database_user
+            ))?;
+            all.postgres_password = Some(Secret::new(password));
+        },
         BuiltinPlanner::DbSync(db_sync) if db_sync.postgres_password.is_none() => {
             let saved = db_sync.common.paths().postgres_credentials_file;
 
@@ -178,6 +196,11 @@ pub(crate) async fn resolve_secrets(planner: &mut BuiltinPlanner) -> anyhow::Res
 /// What the operator has to do next, which this installer cannot do for them
 fn next_steps(stage: &str) -> Vec<String> {
     match stage {
+        "all" => vec![
+            String::from("Back up the validator keys and the network key offline; they cannot be recovered."),
+            String::from("Send the registration file and the WireGuard public key to the Midnight Foundation."),
+            String::from("The relay, db-sync and the node are now catching up, in that order, which takes a while. Watch it with `midnight-installer status`; the node restarts until db-sync has the chain it reads."),
+        ],
         "cardano" => vec![String::from(
             "The relay is syncing. Watch it with `midnight-installer status`; db-sync cannot start until it reaches 100%.",
         )],

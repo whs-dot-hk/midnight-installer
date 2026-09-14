@@ -9,10 +9,17 @@ Each stage of the FNO build-out is its own planner, in the order the runbook imp
 5. [`wireguard`](crate::planner::wireguard::Wireguard) — tunnel tooling and identity
 6. [`validator`](crate::planner::validator::Validator) — the node in validator mode
 
-The ordering constraints between them are not comments: a planner refuses to produce a plan
-until its prerequisites hold, in [`pre_install_check`](Planner::pre_install_check).
+[`all`](crate::planner::all::All) is all six at once, which is the usual way to build a host;
+the individual stages are for redoing one part of one.
+
+[`pre_install_check`](Planner::pre_install_check) is for what must be true of the machine
+before anything runs: root, and the users the services will own files as. Whether the host
+has *caught up* — the relay synced, db-sync near the tip — is not a precondition for
+installing, because each service follows the one below it and retries. That question belongs
+to [`status`](crate::status).
 */
 
+pub mod all;
 pub mod cardano;
 pub mod db_sync;
 pub mod directories;
@@ -104,23 +111,26 @@ them.
 */
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize, clap::Subcommand)]
 pub enum BuiltinPlanner {
+    /// The whole host in one plan: every stage below, in order
+    All(all::All),
     /// The `/data` directory layout every later stage writes into
     Directories(directories::Directories),
     /// The Cardano relay, bootstrapped from a Mithril snapshot
     Cardano(cardano::Cardano),
-    /// PostgreSQL and `cardano-db-sync` (only once the relay is synced)
+    /// PostgreSQL and `cardano-db-sync`, which follows the relay
     DbSync(db_sync::DbSync),
     /// The Midnight node binary and this host's validator keys
     Midnight(midnight::Midnight),
     /// WireGuard tooling and this host's tunnel identity
     Wireguard(wireguard::Wireguard),
-    /// The Midnight node in validator mode (only once db-sync has caught up)
+    /// The Midnight node in validator mode (needs the `midnight` stage)
     Validator(validator::Validator),
 }
 
 impl BuiltinPlanner {
     pub async fn plan(self) -> anyhow::Result<InstallPlan> {
         match self {
+            Self::All(planner) => InstallPlan::plan(planner).await,
             Self::Directories(planner) => InstallPlan::plan(planner).await,
             Self::Cardano(planner) => InstallPlan::plan(planner).await,
             Self::DbSync(planner) => InstallPlan::plan(planner).await,
@@ -132,6 +142,7 @@ impl BuiltinPlanner {
 
     pub fn common_settings(&self) -> &CommonSettings {
         match self {
+            Self::All(planner) => &planner.common,
             Self::Directories(planner) => &planner.common,
             Self::Cardano(planner) => &planner.common,
             Self::DbSync(planner) => &planner.common,
@@ -144,6 +155,7 @@ impl BuiltinPlanner {
     /// The name this planner's receipt is written under
     pub fn typetag_name(&self) -> &'static str {
         match self {
+            Self::All(planner) => planner.typetag_name(),
             Self::Directories(planner) => planner.typetag_name(),
             Self::Cardano(planner) => planner.typetag_name(),
             Self::DbSync(planner) => planner.typetag_name(),

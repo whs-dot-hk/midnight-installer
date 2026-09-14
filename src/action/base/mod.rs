@@ -7,6 +7,7 @@ pub(crate) mod create_symlink;
 pub(crate) mod fetch_and_unpack;
 pub(crate) mod install_binary;
 pub(crate) mod install_tree;
+pub(crate) mod require_paths;
 pub(crate) mod systemd;
 
 pub use apt::{package_installed, AptInstall, ConfigureAptRepository};
@@ -16,4 +17,5 @@ pub use create_symlink::CreateSymlink;
 pub use fetch_and_unpack::FetchAndUnpackTarball;
 pub use install_binary::InstallBinary;
 pub use install_tree::InstallTree;
+pub use require_paths::RequirePaths;
 pub use systemd::{unit_exists, unit_is_active, CreateSystemdUnit, StartSystemdUnit};

@@ -17,21 +17,26 @@ Three concepts carry the whole crate:
   which exists, a key which has been generated, a service which is running) says so and is
   skipped; one which cannot (a release archive, a rendered unit file) is applied again, so a
   second run of a stage refreshes the installed release rather than being a strict no-op.
-- **`InstallPlan`** — the ordered sequence of actions for one stage, plus the planner and
-  version that produced it. It is what gets shown for confirmation, and what is written out
-  as the receipt.
-- **`Planner`** — produces the plan for one stage, and holds that stage's settings.
+- **`InstallPlan`** — the ordered sequence of actions, plus the planner and version that
+  produced it. It is what gets shown for confirmation, and what is written out as the
+  receipt.
+- **`Planner`** — produces the plan, and holds its settings.
 
-The FNO build-out is inherently staged, so each stage is its own planner with its own
-receipt. The ordering is enforced, not documented: `pre_install_check` refuses to *plan*
-db-sync until the relay reports 100% sync, and refuses to plan validator mode until db-sync
-is within a few blocks of the tip. A stage that cannot run yet says so before it changes
-anything.
+`all` is one planner whose plan is the whole host, so the usual way to build one is a single
+command with a single confirmation and a single receipt that unwinds everything in reverse.
+The per-component planners below it exist for redoing one part of a host.
+
+Installing does not wait for the host to catch up, because nothing needs it to: db-sync
+follows a relay which is still syncing, and the node follows a db-sync which is still
+filling, each retrying until the one below it has what it wants. So `pre_install_check` only
+asks what must be true before anything runs — root, and the service users — and how far along
+the host actually is belongs to `status`.
 
 ## Stages
 
 | Stage | What it does |
 | --- | --- |
+| `all` | Every stage below, in order, as one plan |
 | `directories` | The `/data` layout everything else writes into |
 | `cardano` | `cardano-node` + `cardano-cli`, the Mithril client, a snapshot download, and `cardano-node.service` |
 | `db-sync` | PostgreSQL from PGDG, the cluster moved onto the data disk and tuned, the role and database, `cardano-db-sync` and its service |
@@ -42,20 +47,26 @@ anything.
 ## Using it
 
 ```console
-# See what a stage would do, without doing it
+# Build the whole host (shows the plan and asks first; --no-confirm for automation)
+$ sudo midnight-installer install all
+
+# See what it would do, without doing it
 # (planning inspects the machine, so it needs the same privileges an install does)
-$ sudo midnight-installer plan cardano
-$ sudo midnight-installer plan cardano --explain    # with the reasoning for each action
+$ sudo midnight-installer plan all
+$ sudo midnight-installer plan all --explain    # with the reasoning for each action
 
-# Do it (shows the plan and asks first; --no-confirm for automation)
-$ sudo midnight-installer install cardano
-
-# Where has this host got to?
+# Where has this host got to, and has it caught up?
 $ midnight-installer status
 
-# Undo a stage, following the receipt it wrote
+# One component at a time, to redo part of a host
+$ sudo midnight-installer install cardano
 $ sudo midnight-installer uninstall cardano
 ```
+
+After `install all` the host is built but not yet caught up. The relay restores a Mithril
+snapshot and follows the chain, db-sync fills the database behind it, and the node restarts
+until the database has what it reads — hours for the first two, longer for the third. The
+`READINESS` section of `status` is what says when each is there.
 
 Settings are flags with environment variable equivalents, and every stage takes the common
 ones:
