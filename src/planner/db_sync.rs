@@ -1,0 +1,155 @@
+use anyhow::Context;
+use std::collections::HashMap;
+
+use crate::action::base::{CreateDirectory, CreateSystemdUnit, StartSystemdUnit};
+use crate::action::dbsync::InstallCardanoDbSync;
+use crate::action::postgres::{
+    CreatePgpassFile, CreatePostgresDatabase, CreatePostgresRole, InstallPostgresql,
+    RelocatePostgresCluster, SaveDatabaseCredentials,
+};
+use crate::action::{Action, StatefulAction};
+use crate::credentials::DatabaseCredentials;
+use crate::planner::{
+    cardano::base_packages, diff_from_default, require_root, require_user, units, Planner,
+};
+use crate::settings::{
+    CommonSettings, Secret, CARDANO_DB_SYNC_SERVICE, DEFAULT_DB_NAME, DEFAULT_DB_USER,
+};
+
+/** PostgreSQL and `cardano-db-sync`
+
+This stage refuses to plan until the relay has fully synced: db-sync started against a
+partially synced relay writes a database the Midnight node cannot trust.
+*/
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize, clap::Parser)]
+pub struct DbSync {
+    #[clap(flatten)]
+    pub common: CommonSettings,
+
+    /// The password for the PostgreSQL role
+    ///
+    /// Prompted for if it is not given. It is saved, root-only, so the validator stage does
+    /// not have to ask for it a second time.
+    #[clap(long, env = "MIDNIGHT_INSTALLER_POSTGRES_PASSWORD")]
+    pub postgres_password: Option<Secret>,
+
+    /// The PostgreSQL role db-sync and the node log in as
+    #[clap(long, default_value = DEFAULT_DB_USER, env = "MIDNIGHT_INSTALLER_DATABASE_USER")]
+    pub database_user: String,
+
+    /// The database db-sync populates
+    #[clap(long, default_value = DEFAULT_DB_NAME, env = "MIDNIGHT_INSTALLER_DATABASE_NAME")]
+    pub database_name: String,
+}
+
+impl DbSync {
+    pub fn credentials(&self) -> anyhow::Result<DatabaseCredentials> {
+        let password = self.postgres_password.clone().context("No PostgreSQL password was given. Pass `--postgres-password`, set `MIDNIGHT_INSTALLER_POSTGRES_PASSWORD`, or run this from a terminal so it can be asked for.")?;
+
+        Ok(DatabaseCredentials::new(
+            &self.database_user,
+            &self.database_name,
+            password,
+        ))
+    }
+}
+
+#[async_trait::async_trait]
+#[typetag::serde(name = "db-sync")]
+impl Planner for DbSync {
+    async fn default() -> anyhow::Result<Self> {
+        Ok(Self {
+            common: CommonSettings::default(),
+            postgres_password: None,
+            database_user: DEFAULT_DB_USER.into(),
+            database_name: DEFAULT_DB_NAME.into(),
+        })
+    }
+
+    async fn plan(&self) -> anyhow::Result<Vec<StatefulAction<Box<dyn Action>>>> {
+        let paths = self.common.paths();
+        let user = self.common.cardano_user.clone();
+        let credentials = self.credentials()?;
+        let mut actions: Vec<StatefulAction<Box<dyn Action>>> = vec![];
+
+        if self.common.install_base_packages {
+            actions.push(base_packages().await?);
+        }
+
+        actions.push(
+            CreateDirectory::plan(&paths.postgres_data, None, None, Some(0o755), false)
+                .await?
+                .boxed(),
+        );
+        actions.push(InstallPostgresql::plan(&self.common).await?.boxed());
+        actions.push(RelocatePostgresCluster::plan(&self.common).await?.boxed());
+        actions.push(CreatePostgresRole::plan(&credentials).await?.boxed());
+        actions.push(CreatePostgresDatabase::plan(&credentials).await?.boxed());
+        actions.push(CreatePgpassFile::plan(&user, &credentials).await?.boxed());
+        actions.push(
+            SaveDatabaseCredentials::plan(&paths.postgres_credentials_file, &credentials)
+                .await?
+                .boxed(),
+        );
+
+        actions.push(
+            CreateDirectory::plan(
+                &paths.cardano_db_sync_state,
+                user.clone(),
+                user.clone(),
+                Some(0o755),
+                false,
+            )
+            .await?
+            .boxed(),
+        );
+        actions.push(InstallCardanoDbSync::plan(&self.common).await?.boxed());
+        actions.push(
+            CreateSystemdUnit::plan(
+                CARDANO_DB_SYNC_SERVICE,
+                units::cardano_db_sync(&self.common, &credentials)?,
+            )
+            .await?
+            .boxed(),
+        );
+        actions.push(
+            StartSystemdUnit::plan(CARDANO_DB_SYNC_SERVICE, true)
+                .await?
+                .boxed(),
+        );
+
+        Ok(actions)
+    }
+
+    fn settings(&self) -> anyhow::Result<HashMap<String, serde_json::Value>> {
+        let mut settings = self.common.settings()?;
+        settings.insert(
+            "database_user".into(),
+            serde_json::to_value(&self.database_user)?,
+        );
+        settings.insert(
+            "database_name".into(),
+            serde_json::to_value(&self.database_name)?,
+        );
+        Ok(settings)
+    }
+
+    async fn configured_settings(&self) -> anyhow::Result<HashMap<String, serde_json::Value>> {
+        diff_from_default(self).await
+    }
+
+    fn common_settings(&self) -> &CommonSettings {
+        &self.common
+    }
+
+    async fn pre_install_check(&self) -> anyhow::Result<()> {
+        require_root()?;
+        require_user(&self.common.cardano_user)?;
+
+        // The gate the runbook is built around: db-sync must not start before the relay has
+        // caught up
+        crate::check::require_cardano_synced(&self.common).await?;
+
+        Ok(())
+    }
+}
