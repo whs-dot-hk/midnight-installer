@@ -10,7 +10,9 @@ const UNIT_DIR: &str = "/etc/systemd/system";
 /** Write a systemd unit and reload the manager
 
 The unit is rendered from settings every run, so it is written unconditionally — the unit
-file is a projection of the configuration, not state to be preserved.
+file is a projection of the configuration, not state to be preserved. Whether the rendering
+differs from what is on disk is remembered, though: it is what decides whether the service
+has to be bounced afterwards.
 */
 #[derive(Debug, serde::Deserialize, serde::Serialize, Clone)]
 #[serde(tag = "action_name", rename = "create_systemd_unit")]
@@ -18,20 +20,33 @@ pub struct CreateSystemdUnit {
     unit: String,
     path: PathBuf,
     create_file: StatefulAction<CreateFile>,
+    /// Whether the unit file on disk, if any, already had this content when planned
+    #[serde(default)]
+    changed: bool,
 }
 
 impl CreateSystemdUnit {
     #[tracing::instrument(level = "debug", skip_all)]
     pub async fn plan(unit: impl AsRef<str>, buf: String) -> anyhow::Result<StatefulAction<Self>> {
         let unit = unit.as_ref().to_string();
-        let path = PathBuf::from(UNIT_DIR).join(&unit);
+        let path = unit_path(&unit);
+        let changed = match tokio::fs::read_to_string(&path).await {
+            Ok(existing) => existing != buf,
+            Err(_) => true,
+        };
         let create_file = CreateFile::plan(&path, None, None, Some(0o644), buf, true).await?;
 
         Ok(StatefulAction::uncompleted(Self {
             unit,
             path,
             create_file,
+            changed,
         }))
+    }
+
+    /// Whether applying this will leave a different unit file than the one there now
+    pub fn changed(&self) -> bool {
+        self.changed
     }
 }
 
@@ -134,14 +149,36 @@ impl StartSystemdUnit {
             restart: true,
         }))
     }
+
+    /// Restart the unit if `changed`, else only make sure it is enabled and running
+    ///
+    /// For a service which is expensive to bounce: a relay restarted for no reason replays
+    /// its ledger for a good while before it serves a block again, so a re-run which changed
+    /// neither its unit nor its binary leaves it alone.
+    #[tracing::instrument(level = "debug", skip_all)]
+    pub async fn plan_restart_if(
+        unit: impl AsRef<str>,
+        changed: bool,
+    ) -> anyhow::Result<StatefulAction<Self>> {
+        if changed {
+            Self::plan_restart(unit).await
+        } else {
+            Self::plan(unit, true).await
+        }
+    }
 }
 
 pub async fn unit_is_active(unit: &str) -> bool {
     crate::command_succeeds(crate::command("systemctl").arg("is-active").arg(unit)).await
 }
 
+/// Where the unit file for `unit` lives
+pub fn unit_path(unit: &str) -> PathBuf {
+    PathBuf::from(UNIT_DIR).join(unit)
+}
+
 pub async fn unit_exists(unit: &str) -> bool {
-    PathBuf::from(UNIT_DIR).join(unit).exists()
+    unit_path(unit).exists()
 }
 
 #[async_trait::async_trait]

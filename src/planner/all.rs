@@ -16,87 +16,76 @@ use std::collections::{HashMap, HashSet};
 use crate::action::{Action, StatefulAction};
 use crate::planner::{
     cardano::Cardano, db_sync::DbSync, diff_from_default, directories::Directories,
-    midnight::Midnight, require_root, require_user, validator::Validator,
-    validator::DEFAULT_SIDECHAIN_BLOCK_BENEFICIARY, wireguard::Wireguard, Planner,
+    midnight::Midnight, require_root, require_user, validator::Validator, wireguard::Wireguard,
+    Planner,
 };
-use crate::settings::{CommonSettings, Secret, DEFAULT_DB_NAME, DEFAULT_DB_USER};
+use crate::settings::CommonSettings;
 
 /// Everything, in the order the runbook imposes
+///
+/// Its settings are exactly the validator's: the last stage is the one which needs every
+/// setting the stages before it took, so there is nothing to add.
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize, clap::Parser)]
 pub struct All {
     #[clap(flatten)]
-    pub common: CommonSettings,
-
-    /// The password for the PostgreSQL role
-    ///
-    /// Prompted for if it is not given. It is saved, root-only, so a later run of a single
-    /// stage does not have to ask for it again.
-    #[clap(long, env = "MIDNIGHT_INSTALLER_POSTGRES_PASSWORD")]
-    pub postgres_password: Option<Secret>,
-
-    /// The PostgreSQL role db-sync and the node log in as
-    #[clap(long, default_value = DEFAULT_DB_USER, env = "MIDNIGHT_INSTALLER_DATABASE_USER")]
-    pub database_user: String,
-
-    /// The database db-sync populates
-    #[clap(long, default_value = DEFAULT_DB_NAME, env = "MIDNIGHT_INSTALLER_DATABASE_NAME")]
-    pub database_name: String,
-
-    /// The name this validator reports to telemetry (default: this host's name)
-    #[clap(long, env = "MIDNIGHT_INSTALLER_NODE_NAME")]
-    pub node_name: Option<String>,
-
-    /// The address blocks produced by this validator pay out to
-    #[clap(
-        long,
-        default_value = DEFAULT_SIDECHAIN_BLOCK_BENEFICIARY,
-        env = "MIDNIGHT_INSTALLER_SIDECHAIN_BLOCK_BENEFICIARY"
-    )]
-    pub sidechain_block_beneficiary: String,
+    #[serde(flatten)]
+    pub validator: Validator,
 }
 
 impl All {
+    pub fn common(&self) -> &CommonSettings {
+        &self.validator.common
+    }
+
+    /// The common settings the sub-planners are given
+    ///
+    /// The base packages are one action at the top of this plan rather than one per stage,
+    /// so the stages are told not to plan them: each would otherwise ask `dpkg` about the
+    /// same dozen packages again, only for the duplicates to be dropped.
+    fn stage_common(&self) -> CommonSettings {
+        CommonSettings {
+            install_base_packages: false,
+            ..self.common().clone()
+        }
+    }
+
     fn directories(&self) -> Directories {
         Directories {
-            common: self.common.clone(),
+            common: self.stage_common(),
         }
     }
 
     fn cardano(&self) -> Cardano {
         Cardano {
-            common: self.common.clone(),
+            common: self.stage_common(),
         }
     }
 
     fn db_sync(&self) -> DbSync {
         DbSync {
-            common: self.common.clone(),
-            postgres_password: self.postgres_password.clone(),
-            database_user: self.database_user.clone(),
-            database_name: self.database_name.clone(),
+            common: self.stage_common(),
+            postgres_password: self.validator.postgres_password.clone(),
+            database_user: self.validator.database_user.clone(),
+            database_name: self.validator.database_name.clone(),
         }
     }
 
     fn midnight(&self) -> Midnight {
         Midnight {
-            common: self.common.clone(),
+            common: self.stage_common(),
         }
     }
 
     fn wireguard(&self) -> Wireguard {
         Wireguard {
-            common: self.common.clone(),
+            common: self.stage_common(),
         }
     }
 
     fn validator(&self) -> Validator {
         Validator {
-            common: self.common.clone(),
-            postgres_password: self.postgres_password.clone(),
-            database_user: self.database_user.clone(),
-            database_name: self.database_name.clone(),
-            node_name: self.node_name.clone(),
-            sidechain_block_beneficiary: self.sidechain_block_beneficiary.clone(),
+            common: self.stage_common(),
+            ..self.validator.clone()
         }
     }
 }
@@ -106,16 +95,17 @@ impl All {
 impl Planner for All {
     async fn default() -> anyhow::Result<Self> {
         Ok(Self {
-            common: CommonSettings::default(),
-            postgres_password: None,
-            database_user: DEFAULT_DB_USER.into(),
-            database_name: DEFAULT_DB_NAME.into(),
-            node_name: None,
-            sidechain_block_beneficiary: DEFAULT_SIDECHAIN_BLOCK_BENEFICIARY.into(),
+            validator: Validator::default().await?,
         })
     }
 
     async fn plan(&self) -> anyhow::Result<Vec<StatefulAction<Box<dyn Action>>>> {
+        let mut actions: Vec<StatefulAction<Box<dyn Action>>> = vec![];
+
+        if self.common().install_base_packages {
+            actions.push(crate::planner::cardano::base_packages().await?);
+        }
+
         let stages = [
             self.directories().plan().await?,
             self.cardano().plan().await?,
@@ -125,38 +115,42 @@ impl Planner for All {
             self.validator().plan().await?,
         ];
 
-        // The stages overlap: several of them install the same base packages and create the
-        // same directories. An action's synopsis names what it does and what it does it to,
-        // so the same synopsis twice is the same work twice, and the first one wins.
-        let mut seen = HashSet::new();
-        let mut actions = vec![];
+        // The stages overlap: several of them create the same directories. An action is
+        // the same work as an earlier one only when every detail of it is the same (the
+        // path, but also the owner and mode), and then the first one wins. The same synopsis
+        // with different details is two stages disagreeing about one thing, which no order
+        // of the two would make right, so it is refused rather than resolved by luck.
+        let mut seen: HashMap<String, serde_json::Value> = HashMap::new();
+        let mut kept = HashSet::new();
         for stage in stages {
             for action in stage {
-                if seen.insert(action.tracing_synopsis()) {
-                    actions.push(action);
+                let synopsis = action.tracing_synopsis();
+                let identity = identity(&action)?;
+
+                match seen.get(&synopsis) {
+                    None => {
+                        seen.insert(synopsis, identity);
+                        actions.push(action);
+                    },
+                    Some(earlier) if *earlier == identity => {
+                        kept.insert(synopsis);
+                    },
+                    Some(earlier) => anyhow::bail!(
+                        "Two stages of the `all` plan disagree about `{synopsis}`: one plans {earlier}, another {identity}. This is a bug in the installer, not in this host."
+                    ),
                 }
             }
         }
+        tracing::debug!(
+            "Dropped {} duplicated action(s) from the whole-host plan",
+            kept.len()
+        );
 
         Ok(actions)
     }
 
     fn settings(&self) -> anyhow::Result<HashMap<String, serde_json::Value>> {
-        let mut settings = self.common.settings()?;
-        settings.insert(
-            "database_user".into(),
-            serde_json::to_value(&self.database_user)?,
-        );
-        settings.insert(
-            "database_name".into(),
-            serde_json::to_value(&self.database_name)?,
-        );
-        settings.insert("node_name".into(), serde_json::to_value(&self.node_name)?);
-        settings.insert(
-            "sidechain_block_beneficiary".into(),
-            serde_json::to_value(&self.sidechain_block_beneficiary)?,
-        );
-        Ok(settings)
+        self.validator.settings()
     }
 
     async fn configured_settings(&self) -> anyhow::Result<HashMap<String, serde_json::Value>> {
@@ -164,12 +158,41 @@ impl Planner for All {
     }
 
     fn common_settings(&self) -> &CommonSettings {
-        &self.common
+        self.common()
     }
 
     async fn pre_install_check(&self) -> anyhow::Result<()> {
         require_root()?;
-        require_user(&self.common.cardano_user)?;
-        require_user(&self.common.midnight_user)
+        require_user(&self.common().cardano_user)?;
+        require_user(&self.common().midnight_user)
+    }
+}
+
+/// Everything an action is made of, which is what decides whether two are the same one
+///
+/// The state is left out: whether the machine already had a directory says nothing about
+/// whether two stages meant the same directory.
+fn identity(action: &StatefulAction<Box<dyn Action>>) -> anyhow::Result<serde_json::Value> {
+    serde_json::to_value(&action.action)
+        .map_err(|e| anyhow::anyhow!("Describing `{}`: {e}", action.tracing_synopsis()))
+}
+
+#[cfg(test)]
+mod test {
+    use super::*;
+
+    #[tokio::test]
+    async fn the_receipt_keeps_the_settings_flat() -> anyhow::Result<()> {
+        let planner: Box<dyn Planner> = All::default().await?.boxed();
+        let json = serde_json::to_value(&planner)?;
+
+        assert_eq!(json["planner"], "all");
+        assert!(json.get("common").is_some(), "{json}");
+        assert!(json.get("database_user").is_some(), "{json}");
+        assert!(json.get("validator").is_none(), "{json}");
+
+        let back: Box<dyn Planner> = serde_json::from_value(json)?;
+        assert_eq!(back.typetag_name(), "all");
+        Ok(())
     }
 }

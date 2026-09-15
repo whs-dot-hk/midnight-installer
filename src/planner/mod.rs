@@ -142,7 +142,7 @@ impl BuiltinPlanner {
 
     pub fn common_settings(&self) -> &CommonSettings {
         match self {
-            Self::All(planner) => &planner.common,
+            Self::All(planner) => planner.common(),
             Self::Directories(planner) => &planner.common,
             Self::Cardano(planner) => &planner.common,
             Self::DbSync(planner) => &planner.common,

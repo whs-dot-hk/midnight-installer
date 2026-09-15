@@ -137,40 +137,18 @@ from a flag, from the credentials an earlier stage saved, or from whoever is at 
 */
 pub(crate) async fn resolve_secrets(planner: &mut BuiltinPlanner) -> anyhow::Result<()> {
     match planner {
-        BuiltinPlanner::All(all) if all.postgres_password.is_none() => {
-            let saved = all.common.paths().postgres_credentials_file;
-
-            if let Ok(credentials) = crate::credentials::DatabaseCredentials::load(&saved).await {
-                tracing::info!("Using the database password saved in `{}`", saved.display());
-                all.postgres_password = Some(credentials.password);
-                return Ok(());
-            }
-
-            // Asked once, here, and handed to both the stage which creates the role and the
-            // stage which logs in as it — neither goes looking for a file which the same
-            // plan has not written yet
-            let password = interaction::prompt_new_secret(&format!(
-                "Password for the PostgreSQL role `{}`",
-                all.database_user
-            ))?;
-            all.postgres_password = Some(Secret::new(password));
+        // Asked once, here, and handed to both the stage which creates the role and the
+        // stage which logs in as it — neither goes looking for a file which the same plan
+        // has not written yet
+        BuiltinPlanner::All(all) if all.validator.postgres_password.is_none() => {
+            let saved = all.common().paths().postgres_credentials_file;
+            all.validator.postgres_password =
+                Some(saved_or_new_password(&saved, &all.validator.database_user).await?);
         },
         BuiltinPlanner::DbSync(db_sync) if db_sync.postgres_password.is_none() => {
             let saved = db_sync.common.paths().postgres_credentials_file;
-
-            // A second run of this stage should reuse the password the first one set, or it
-            // would reset the role's password to something the running services do not know
-            if let Ok(credentials) = crate::credentials::DatabaseCredentials::load(&saved).await {
-                tracing::info!("Using the database password saved in `{}`", saved.display());
-                db_sync.postgres_password = Some(credentials.password);
-                return Ok(());
-            }
-
-            let password = interaction::prompt_new_secret(&format!(
-                "Password for the PostgreSQL role `{}`",
-                db_sync.database_user
-            ))?;
-            db_sync.postgres_password = Some(Secret::new(password));
+            db_sync.postgres_password =
+                Some(saved_or_new_password(&saved, &db_sync.database_user).await?);
         },
         BuiltinPlanner::Validator(validator) if validator.postgres_password.is_none() => {
             let saved = validator.common.paths().postgres_credentials_file;
@@ -193,6 +171,25 @@ pub(crate) async fn resolve_secrets(planner: &mut BuiltinPlanner) -> anyhow::Res
     Ok(())
 }
 
+/// The password the db-sync stage saved, else a new one asked for at the terminal
+///
+/// A second run should reuse the password the first one set, or it would reset the role's
+/// password to something the running services do not know.
+async fn saved_or_new_password(
+    saved: &std::path::Path,
+    database_user: &str,
+) -> anyhow::Result<Secret> {
+    if let Ok(credentials) = crate::credentials::DatabaseCredentials::load(saved).await {
+        tracing::info!("Using the database password saved in `{}`", saved.display());
+        return Ok(credentials.password);
+    }
+
+    let password = interaction::prompt_new_secret(&format!(
+        "Password for the PostgreSQL role `{database_user}`"
+    ))?;
+    Ok(Secret::new(password))
+}
+
 /// What the operator has to do next, which this installer cannot do for them
 fn next_steps(stage: &str) -> Vec<String> {
     match stage {
@@ -202,7 +199,10 @@ fn next_steps(stage: &str) -> Vec<String> {
             String::from("The relay, db-sync and the node are now catching up, in that order, which takes a while. Watch it with `midnight-installer status`; the node restarts until db-sync has the chain it reads."),
         ],
         "cardano" => vec![String::from(
-            "The relay is syncing. Watch it with `midnight-installer status`; db-sync cannot start until it reaches 100%.",
+            "The relay is syncing, which takes a while. Watch it with `midnight-installer status`; the `db-sync` step can be run now and follows along behind it.",
+        )],
+        "db-sync" => vec![String::from(
+            "db-sync is filling the database behind the relay. Watch it with `midnight-installer status`; the `validator` step can be run now and the node restarts until the database has what it reads.",
         )],
         "midnight" => vec![
             String::from("Back up the validator keys and the network key offline; they cannot be recovered."),

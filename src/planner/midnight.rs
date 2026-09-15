@@ -20,8 +20,9 @@ const VALIDATOR_KEYS: &[(&str, KeyScheme, &str)] = &[
 
 /** The Midnight node binary and this host's validator identity
 
-Nothing here starts the node: running as a validator is its own stage, because it may not
-begin before db-sync has caught up.
+Nothing here starts the node: running as a validator is its own stage, which needs the
+database credentials this one does not, and which an operator may want to redo (a new node
+name, a new beneficiary) without touching the keys.
 */
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize, clap::Parser)]
 pub struct Midnight {

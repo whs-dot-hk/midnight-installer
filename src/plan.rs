@@ -35,8 +35,8 @@ impl InstallPlan {
             version: current_version()?,
         };
 
-        // Some `Action::plan` calls inspect the machine, and would be misleading (or would
-        // fail) if the stage before them has not happened yet
+        // `Action::plan` calls inspect the machine (owners, modes, what is installed), so
+        // they need the privileges an install has before they can be trusted
         plan.pre_install_check().await?;
         plan.actions = plan.planner.plan().await?;
 

@@ -1,10 +1,10 @@
-/*! The gates between the stages of the build-out
+/*! Questions about how far the host has caught up
 
-The FNO runbook is a sequence with hard ordering: `cardano-db-sync` may not start before the
-relay has fully synced, and the Midnight node may not run as a validator before db-sync has
-caught up to the tip. These checks are what
-[`pre_install_check`](crate::planner::Planner::pre_install_check) calls, so an out of order
-step is refused while planning rather than half applied.
+The FNO build-out used to be gated on these: db-sync could not be installed before the relay
+had synced, nor the validator before db-sync had reached the tip. Nothing is gated any more,
+because each service follows the one below it and retries, so these are now what
+[`status`](crate::status) asks in order to tell the operator whether the host is *there yet*,
+and how far off it is if not.
 */
 
 use anyhow::Context;
@@ -12,7 +12,7 @@ use anyhow::Context;
 use crate::credentials::DatabaseCredentials;
 use crate::settings::CommonSettings;
 
-/// How close db-sync must be to the relay's tip before the validator may start
+/// How close db-sync must be to the relay's tip to count as caught up
 pub const DB_SYNC_MAX_LAG: u64 = 20;
 
 /// The point at which `cardano-cli query tip` is treated as fully synced
@@ -22,6 +22,23 @@ pub const SYNC_PROGRESS_COMPLETE: f64 = 99.99;
 pub struct CardanoTip {
     pub sync_progress: f64,
     pub block: u64,
+}
+
+/// Whether a service has caught up, or is still on its way
+///
+/// Only the two states a working service can be in. A service which is broken (not running,
+/// not answering, refusing the password) is neither, and is reported as an error by whatever
+/// asked, so that `status` never shows a failure as "still catching up".
+#[derive(Debug, Clone, PartialEq)]
+pub enum Readiness {
+    Ready(String),
+    Waiting(String),
+}
+
+impl Readiness {
+    pub fn is_ready(&self) -> bool {
+        matches!(self, Self::Ready(_))
+    }
 }
 
 /// Ask the relay where it is, via its socket
@@ -83,26 +100,33 @@ pub async fn cardano_tip(settings: &CommonSettings) -> anyhow::Result<CardanoTip
     })
 }
 
-/// Refuse to continue unless the relay has reached the tip
-#[tracing::instrument(level = "debug", skip_all)]
-pub async fn require_cardano_synced(settings: &CommonSettings) -> anyhow::Result<CardanoTip> {
-    if !crate::action::base::unit_is_active(crate::settings::CARDANO_NODE_SERVICE).await {
-        anyhow::bail!(
-            "`{}` is not running, so the relay cannot be synced",
-            crate::settings::CARDANO_NODE_SERVICE
-        );
-    }
-
-    let tip = cardano_tip(settings).await?;
+/// Whether the relay has reached the tip of the chain
+pub fn cardano_readiness(tip: &CardanoTip) -> Readiness {
     if tip.sync_progress < SYNC_PROGRESS_COMPLETE {
-        anyhow::bail!(
-            "The Cardano relay is at {progress}%. Wait for it to reach 100%, then run this step again.",
+        Readiness::Waiting(format!(
+            "The Cardano relay is at {progress}% and still syncing",
             progress = tip.sync_progress,
-        );
+        ))
+    } else {
+        Readiness::Ready(format!(
+            "The relay is synced ({progress}%, block {block})",
+            progress = tip.sync_progress,
+            block = tip.block,
+        ))
     }
+}
 
-    tracing::debug!("Cardano node is synced ({}%)", tip.sync_progress);
-    Ok(tip)
+/// Whether db-sync, at `db_block`, has caught up with a relay at `tip`
+pub fn db_sync_readiness(tip: &CardanoTip, db_block: u64) -> Readiness {
+    let lag = tip.block.saturating_sub(db_block);
+
+    if lag > DB_SYNC_MAX_LAG {
+        Readiness::Waiting(format!(
+            "`cardano-db-sync` is {lag} blocks behind the relay and still catching up (at most {DB_SYNC_MAX_LAG} counts as caught up)"
+        ))
+    } else {
+        Readiness::Ready(format!("db-sync is at the tip ({lag} block(s) behind)"))
+    }
 }
 
 /// Run a single statement and return its unaligned, untitled output
@@ -140,11 +164,6 @@ pub async fn psql_query(credentials: &DatabaseCredentials, sql: &str) -> anyhow:
     Ok(String::from_utf8_lossy(&output.stdout).trim().to_string())
 }
 
-/// Whether these credentials can actually open the database
-pub async fn postgres_reachable(credentials: &DatabaseCredentials) -> bool {
-    matches!(psql_query(credentials, "SELECT 1;").await, Ok(value) if value == "1")
-}
-
 /// The highest block `cardano-db-sync` has written
 pub async fn db_sync_block(credentials: &DatabaseCredentials) -> anyhow::Result<u64> {
     let value = psql_query(credentials, "SELECT COALESCE(MAX(block_no),0) FROM block;").await?;
@@ -154,36 +173,38 @@ pub async fn db_sync_block(credentials: &DatabaseCredentials) -> anyhow::Result<
         .with_context(|| format!("`cardano-db-sync` returned `{value}` as its latest block"))
 }
 
-/// Refuse to continue unless db-sync has caught up with the relay
-#[tracing::instrument(level = "debug", skip_all)]
-pub async fn require_db_sync_near_tip(
-    settings: &CommonSettings,
-    credentials: &DatabaseCredentials,
-) -> anyhow::Result<u64> {
-    if !crate::action::base::unit_is_active(crate::settings::CARDANO_DB_SYNC_SERVICE).await {
-        anyhow::bail!(
-            "`{}` is not running",
-            crate::settings::CARDANO_DB_SYNC_SERVICE
-        );
-    }
-
-    let tip = cardano_tip(settings).await?;
-    let db_block = db_sync_block(credentials).await?;
-    let lag = tip.block.saturating_sub(db_block);
-
-    tracing::info!(
-        "Cardano tip block: {tip_block}, db-sync block: {db_block}, lag: {lag} block(s)",
-        tip_block = tip.block
-    );
-
-    if lag > DB_SYNC_MAX_LAG {
-        anyhow::bail!(
-            "`cardano-db-sync` is {lag} blocks behind the relay. Wait for it to catch up (at most {DB_SYNC_MAX_LAG} blocks), then run this step again."
-        );
-    }
-    Ok(lag)
-}
-
 pub fn is_root() -> bool {
     nix::unistd::Uid::effective().is_root()
+}
+
+#[cfg(test)]
+mod test {
+    use super::*;
+
+    #[test]
+    fn a_relay_short_of_the_tip_is_waiting() {
+        let tip = CardanoTip {
+            sync_progress: 57.3,
+            block: 1_000,
+        };
+        assert!(!cardano_readiness(&tip).is_ready());
+
+        let tip = CardanoTip {
+            sync_progress: 100.0,
+            block: 1_000,
+        };
+        assert!(cardano_readiness(&tip).is_ready());
+    }
+
+    #[test]
+    fn db_sync_is_ready_within_the_allowed_lag() {
+        let tip = CardanoTip {
+            sync_progress: 100.0,
+            block: 1_000,
+        };
+        assert!(db_sync_readiness(&tip, 1_000 - DB_SYNC_MAX_LAG).is_ready());
+        assert!(!db_sync_readiness(&tip, 1_000 - DB_SYNC_MAX_LAG - 1).is_ready());
+        // db-sync a block ahead of a tip read a moment earlier is not "behind"
+        assert!(db_sync_readiness(&tip, 1_001).is_ready());
+    }
 }

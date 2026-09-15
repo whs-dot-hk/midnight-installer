@@ -26,6 +26,12 @@ Three concepts carry the whole crate:
 command with a single confirmation and a single receipt that unwinds everything in reverse.
 The per-component planners below it exist for redoing one part of a host.
 
+A stage installed on its own checks, as its first action, that what the stage before it
+produced is in place (`db-sync` looks for the relay, `validator` for the node binary and keys
+and for a database it can log in to with the password it was given), and stops with the name
+of the missing piece and the step which produces it. Within `all` those checks always pass,
+because the same plan produced the piece a few actions earlier.
+
 Installing does not wait for the host to catch up, because nothing needs it to: db-sync
 follows a relay which is still syncing, and the node follows a db-sync which is still
 filling, each retrying until the one below it has what it wants. So `pre_install_check` only
@@ -56,17 +62,31 @@ $ sudo midnight-installer plan all
 $ sudo midnight-installer plan all --explain    # with the reasoning for each action
 
 # Where has this host got to, and has it caught up?
-$ midnight-installer status
+# (it reads the root-only credentials and asks the relay as its user, so it runs as root)
+$ sudo midnight-installer status
 
 # One component at a time, to redo part of a host
 $ sudo midnight-installer install cardano
-$ sudo midnight-installer uninstall cardano
 ```
 
 After `install all` the host is built but not yet caught up. The relay restores a Mithril
 snapshot and follows the chain, db-sync fills the database behind it, and the node restarts
 until the database has what it reads — hours for the first two, longer for the third. The
-`READINESS` section of `status` is what says when each is there.
+`READINESS` section of `status` is what says when each is there: `[OK]` and `[WAIT]` are a
+working service which has or has not caught up, `[MISS]` a stage which has not been run, and
+`[FAIL]` a service which is installed but broken, with the reason.
+
+Running a stage again refreshes it: release archives are fetched and unpacked again, units
+are rewritten, and directories, keys and databases which already exist are left as they are.
+A service is restarted only when the re-run changed its unit file or its binary; a re-run
+which changed neither leaves the relay serving blocks. The validator is the exception, and is
+always restarted, because its environment file is rewritten with whatever the run was given.
+
+Each `install` writes one receipt, named for the stage: `install all` writes `all.json`, and
+`uninstall all` follows it. `uninstall cardano` follows `cardano.json`, which exists only if
+the cardano stage was installed on its own, so a host built with `all` is unwound with
+`uninstall all`, not stage by stage. Running `install cardano` on such a host does work, to
+refresh that part, and writes its own receipt alongside `all.json`.
 
 Settings are flags with environment variable equivalents, and every stage takes the common
 ones:
@@ -99,6 +119,17 @@ $ sudo midnight-installer install cardano \
 
 A version this installer has no checksum for, with none given, is refused rather than
 installed unverified.
+
+A `midnight-node` release the host cannot download can be staged on it out of band and
+installed from there with `--midnight-archive-path`. Its checksum must then be given with
+`--midnight-sha256`, and the file must already be there when the plan is made, so a mistyped
+path is caught before the stages ahead of it have run:
+
+```console
+$ sudo midnight-installer install all \
+    --midnight-archive-path /root/midnight-node-0.22.2-linux-amd64.tar.gz \
+    --midnight-sha256 <from the release's checksum file>
+```
 
 ## What revert will not do
 

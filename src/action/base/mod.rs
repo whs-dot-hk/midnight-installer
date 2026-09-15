@@ -18,4 +18,4 @@ pub use fetch_and_unpack::FetchAndUnpackTarball;
 pub use install_binary::InstallBinary;
 pub use install_tree::InstallTree;
 pub use require_paths::RequirePaths;
-pub use systemd::{unit_exists, unit_is_active, CreateSystemdUnit, StartSystemdUnit};
+pub use systemd::{unit_exists, unit_is_active, unit_path, CreateSystemdUnit, StartSystemdUnit};

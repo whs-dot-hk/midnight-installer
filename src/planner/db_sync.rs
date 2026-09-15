@@ -1,7 +1,7 @@
 use anyhow::Context;
 use std::collections::HashMap;
 
-use crate::action::base::{CreateDirectory, CreateSystemdUnit, StartSystemdUnit};
+use crate::action::base::{CreateDirectory, CreateSystemdUnit, RequirePaths, StartSystemdUnit};
 use crate::action::dbsync::InstallCardanoDbSync;
 use crate::action::postgres::{
     CreatePgpassFile, CreatePostgresDatabase, CreatePostgresRole, InstallPostgresql,
@@ -10,10 +10,12 @@ use crate::action::postgres::{
 use crate::action::{Action, StatefulAction};
 use crate::credentials::DatabaseCredentials;
 use crate::planner::{
-    cardano::base_packages, diff_from_default, require_root, require_user, units, Planner,
+    cardano::{base_packages, installed_version_matches},
+    diff_from_default, require_root, require_user, units, Planner,
 };
 use crate::settings::{
-    CommonSettings, Secret, CARDANO_DB_SYNC_SERVICE, DEFAULT_DB_NAME, DEFAULT_DB_USER,
+    CommonSettings, Secret, CARDANO_DB_SYNC_SERVICE, CARDANO_NODE_SERVICE, DEFAULT_DB_NAME,
+    DEFAULT_DB_USER,
 };
 
 /** PostgreSQL and `cardano-db-sync`
@@ -71,7 +73,32 @@ impl Planner for DbSync {
         let paths = self.common.paths();
         let user = self.common.cardano_user.clone();
         let credentials = self.credentials()?;
+        let bin_dir = crate::settings::user_bin_dir(&user)?;
         let mut actions: Vec<StatefulAction<Box<dyn Action>>> = vec![];
+
+        // First, before PostgreSQL is installed and its cluster moved: db-sync's unit
+        // `Requires=` the relay's, so without the `cardano` stage the last action here would
+        // fail after everything before it had changed the host. Checked when it runs rather
+        // than while planning, because in a whole-host plan the `cardano` stage is a few
+        // actions earlier in the same plan.
+        actions.push(
+            RequirePaths::plan(
+                "the Cardano relay db-sync follows",
+                vec![
+                    (
+                        crate::action::base::unit_path(CARDANO_NODE_SERVICE),
+                        format!("the `{CARDANO_NODE_SERVICE}` unit"),
+                    ),
+                    (
+                        bin_dir.join("cardano-node"),
+                        String::from("the `cardano-node` binary"),
+                    ),
+                ],
+                "Run the `cardano` step first.",
+            )
+            .await?
+            .boxed(),
+        );
 
         if self.common.install_base_packages {
             actions.push(base_packages().await?);
@@ -105,16 +132,24 @@ impl Planner for DbSync {
             .boxed(),
         );
         actions.push(InstallCardanoDbSync::plan(&self.common).await?.boxed());
-        actions.push(
-            CreateSystemdUnit::plan(
-                CARDANO_DB_SYNC_SERVICE,
-                units::cardano_db_sync(&self.common, &credentials)?,
+
+        // Restarted only when this plan changes what it runs: its unit, or its binary.
+        // db-sync rolls back and revalidates after a restart, which a re-run that changed
+        // nothing should not cost the host.
+        let unit = CreateSystemdUnit::plan(
+            CARDANO_DB_SYNC_SERVICE,
+            units::cardano_db_sync(&self.common, &credentials)?,
+        )
+        .await?;
+        let changed = unit.action.changed()
+            || !installed_version_matches(
+                &bin_dir.join("cardano-db-sync"),
+                &self.common.db_sync_version,
             )
-            .await?
-            .boxed(),
-        );
+            .await;
+        actions.push(unit.boxed());
         actions.push(
-            StartSystemdUnit::plan(CARDANO_DB_SYNC_SERVICE, true)
+            StartSystemdUnit::plan_restart_if(CARDANO_DB_SYNC_SERVICE, changed)
                 .await?
                 .boxed(),
         );

@@ -77,7 +77,7 @@ impl CommandExecute for Uninstall {
             .await
             .with_context(|| {
                 format!(
-                    "Reading the receipt `{path}`. Nothing was installed from here, or it was installed with a different data root.",
+                    "Reading the receipt `{path}`. Nothing was installed from here, it was installed with a different data root, or it was installed as part of `all`, whose receipt is `all.json` and which `uninstall all` follows.",
                     path = receipt_path.display()
                 )
             })?;
