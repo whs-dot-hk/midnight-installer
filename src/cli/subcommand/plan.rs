@@ -10,8 +10,9 @@ use crate::{
 /**
 Describe what a stage would do
 
-Planning inspects the machine, so it needs the same privileges an install does, and it
-refuses just as an install would if the stage before this one has not finished.
+Planning inspects the machine, so it needs the same privileges an install does. It does not
+check that the stage before this one has run: the plan is the same either way, and the
+actions which need what an earlier stage produces check for it when they run.
 */
 #[derive(Debug, Parser)]
 pub struct Plan {

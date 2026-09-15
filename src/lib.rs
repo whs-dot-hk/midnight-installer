@@ -10,11 +10,11 @@ WireGuard identity — into three concepts:
 * [`Planner`](planner::Planner): something which produces an [`InstallPlan`] for one
   component of the host.
 
-Each component is its own planner, because the FNO build-out is inherently staged: db-sync
-may not start before the relay is fully synced, and the validator may not start before
-db-sync has caught up. Those gates are enforced in
-[`pre_install_check`](planner::Planner::pre_install_check), so a plan refuses to be made
-rather than half-applied.
+Each component is its own planner, in the order the FNO runbook imposes, and
+[`all`](planner::all::All) lays the six end to end as one plan. Nothing waits for the host to
+catch up: db-sync follows a relay which is still syncing and the node follows a db-sync which
+is still filling, so [`pre_install_check`](planner::Planner::pre_install_check) asks only what
+must be true before anything runs, and how far along the host is belongs to [`status`].
 
 Nothing recovers from an error: every failure is reported to the operator and stops the
 stage, so errors are [`anyhow`] chains of context rather than typed variants.

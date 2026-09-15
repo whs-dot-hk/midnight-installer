@@ -1,11 +1,17 @@
 /*! A read-only report of where this host has got to
 
 Nothing here changes the machine: it is the "what does this host look like right now" view
-that makes the staged build-out navigable.
+that makes the staged build-out navigable. Installing does not wait for the host to catch up,
+so the `READINESS` section at the end is where an operator finds out whether it has, and
+whether anything is broken rather than merely behind.
+
+It reads root-only files and queries the relay as its service user, so it runs as root.
 */
 
 use std::fmt::Write as _;
 
+use crate::check::{CardanoTip, Readiness};
+use crate::credentials::DatabaseCredentials;
 use crate::settings::{
     CommonSettings, CARDANO_DB_SYNC_SERVICE, CARDANO_NODE_SERVICE, MIDNIGHT_NODE_SERVICE,
 };
@@ -25,10 +31,15 @@ pub async fn report(settings: &CommonSettings) -> String {
         let _ = writeln!(buf, "{mark} {}", directory.display());
     }
 
+    // Each fact about the machine is fetched once, here, and the readiness at the end is
+    // derived from what was fetched: the tip query alone can block for twenty seconds on a
+    // relay which is up but not answering
     let _ = writeln!(buf, "\n===== CARDANO RELAY =====");
-    if crate::action::base::unit_exists(CARDANO_NODE_SERVICE).await {
-        let _ = writeln!(buf, "{}", unit_state(CARDANO_NODE_SERVICE).await);
-        match crate::check::cardano_tip(settings).await {
+    let relay = Service::inspect(CARDANO_NODE_SERVICE).await;
+    let tip = if relay.installed {
+        let _ = writeln!(buf, "{relay}");
+        let tip = crate::check::cardano_tip(settings).await;
+        match &tip {
             Ok(tip) => {
                 let _ = writeln!(
                     buf,
@@ -38,12 +49,14 @@ pub async fn report(settings: &CommonSettings) -> String {
                 );
             },
             Err(e) => {
-                let _ = writeln!(buf, "Tip unavailable: {e}");
+                let _ = writeln!(buf, "Tip unavailable: {e:#}");
             },
         }
+        Some(tip)
     } else {
         let _ = writeln!(buf, "{CARDANO_NODE_SERVICE} is not installed");
-    }
+        None
+    };
 
     let _ = writeln!(buf, "\n===== POSTGRESQL =====");
     match command_output("psql", &["--version"]).await {
@@ -75,23 +88,29 @@ pub async fn report(settings: &CommonSettings) -> String {
     }
 
     let _ = writeln!(buf, "\n===== CARDANO DB SYNC =====");
-    if crate::action::base::unit_exists(CARDANO_DB_SYNC_SERVICE).await {
-        let _ = writeln!(buf, "{}", unit_state(CARDANO_DB_SYNC_SERVICE).await);
-        if let Ok(credentials) =
-            crate::credentials::DatabaseCredentials::load(&paths.postgres_credentials_file).await
-        {
-            match crate::check::db_sync_block(&credentials).await {
-                Ok(block) => {
-                    let _ = writeln!(buf, "Latest block written: {block}");
-                },
-                Err(e) => {
-                    let _ = writeln!(buf, "Database unavailable: {e}");
-                },
-            }
+    let db_sync = Service::inspect(CARDANO_DB_SYNC_SERVICE).await;
+    let credentials = DatabaseCredentials::load(&paths.postgres_credentials_file).await;
+    let db_block = if db_sync.installed {
+        let _ = writeln!(buf, "{db_sync}");
+        match &credentials {
+            Ok(credentials) => {
+                let db_block = crate::check::db_sync_block(credentials).await;
+                match &db_block {
+                    Ok(block) => {
+                        let _ = writeln!(buf, "Latest block written: {block}");
+                    },
+                    Err(e) => {
+                        let _ = writeln!(buf, "Database unavailable: {e:#}");
+                    },
+                }
+                Some(db_block)
+            },
+            Err(_) => None,
         }
     } else {
         let _ = writeln!(buf, "{CARDANO_DB_SYNC_SERVICE} is not installed");
-    }
+        None
+    };
 
     let _ = writeln!(buf, "\n===== MIDNIGHT =====");
     match crate::settings::user_bin_dir(&settings.midnight_user) {
@@ -123,8 +142,9 @@ pub async fn report(settings: &CommonSettings) -> String {
         let _ = writeln!(buf, "{mark} {}", path.display());
     }
 
-    if crate::action::base::unit_exists(MIDNIGHT_NODE_SERVICE).await {
-        let _ = writeln!(buf, "{}", unit_state(MIDNIGHT_NODE_SERVICE).await);
+    let node = Service::inspect(MIDNIGHT_NODE_SERVICE).await;
+    if node.installed {
+        let _ = writeln!(buf, "{node}");
     } else {
         let _ = writeln!(buf, "{MIDNIGHT_NODE_SERVICE} is not installed");
     }
@@ -148,35 +168,20 @@ pub async fn report(settings: &CommonSettings) -> String {
         },
     }
 
-    // Installing no longer waits on these, so this is where an operator finds out whether
-    // the host has actually caught up, and how far off it is if not
     let _ = writeln!(buf, "\n===== READINESS =====");
-    match crate::check::require_cardano_synced(settings).await {
-        Ok(tip) => {
-            let _ = writeln!(buf, "[OK]   The relay is synced ({}%)", tip.sync_progress);
-        },
-        Err(e) => {
-            let _ = writeln!(buf, "[WAIT] {e}");
-        },
-    }
-    match crate::credentials::DatabaseCredentials::load(&paths.postgres_credentials_file).await {
-        Ok(credentials) => {
-            match crate::check::require_db_sync_near_tip(settings, &credentials).await {
-                Ok(lag) => {
-                    let _ = writeln!(buf, "[OK]   db-sync is at the tip ({lag} block(s) behind)");
-                },
-                Err(e) => {
-                    let _ = writeln!(buf, "[WAIT] {e}");
-                },
-            }
-        },
-        Err(_) => {
-            let _ = writeln!(
-                buf,
-                "[WAIT] The database credentials have not been saved yet, so db-sync cannot be checked"
-            );
-        },
-    }
+    let relay_verdict = relay_readiness(&relay, tip.as_ref());
+    let _ = writeln!(buf, "{relay_verdict}");
+    let _ = writeln!(
+        buf,
+        "{}",
+        db_sync_readiness(
+            &db_sync,
+            &credentials,
+            db_block.as_ref(),
+            tip.as_ref(),
+            &paths.postgres_credentials_file,
+        )
+    );
 
     let _ = writeln!(buf, "\n===== RECEIPTS =====");
     match tokio::fs::read_dir(&paths.receipt_dir).await {
@@ -198,19 +203,149 @@ pub async fn report(settings: &CommonSettings) -> String {
     buf
 }
 
-async fn unit_state(unit: &str) -> String {
-    let active = command_output("systemctl", &["is-active", unit])
-        .await
-        .unwrap_or_default();
-    let enabled = command_output("systemctl", &["is-enabled", unit])
-        .await
-        .unwrap_or_default();
+/// A systemd unit as the host has it: installed or not, and what `systemctl` says of it
+struct Service {
+    unit: &'static str,
+    installed: bool,
+    active: String,
+    enabled: String,
+}
 
-    format!(
-        "{unit}: {active}, {enabled}",
-        active = blank_as_unknown(active.trim()),
-        enabled = blank_as_unknown(enabled.trim()),
-    )
+impl Service {
+    async fn inspect(unit: &'static str) -> Self {
+        let installed = crate::action::base::unit_exists(unit).await;
+        let active = command_output("systemctl", &["is-active", unit])
+            .await
+            .unwrap_or_default();
+        let enabled = command_output("systemctl", &["is-enabled", unit])
+            .await
+            .unwrap_or_default();
+
+        Self {
+            unit,
+            installed,
+            active: active.trim().to_string(),
+            enabled: enabled.trim().to_string(),
+        }
+    }
+
+    fn is_active(&self) -> bool {
+        self.active == "active"
+    }
+}
+
+impl std::fmt::Display for Service {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(
+            f,
+            "{unit}: {active}, {enabled}",
+            unit = self.unit,
+            active = blank_as_unknown(&self.active),
+            enabled = blank_as_unknown(&self.enabled),
+        )
+    }
+}
+
+/// One line of the `READINESS` section
+///
+/// `Missing` is a stage which has not been installed, `Failed` one which is installed but
+/// broken, and the other two are the states of a service which is working.
+enum Verdict {
+    Ready(String),
+    Waiting(String),
+    Missing(String),
+    Failed(String),
+}
+
+impl From<Readiness> for Verdict {
+    fn from(readiness: Readiness) -> Self {
+        match readiness {
+            Readiness::Ready(why) => Self::Ready(why),
+            Readiness::Waiting(why) => Self::Waiting(why),
+        }
+    }
+}
+
+impl std::fmt::Display for Verdict {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Ready(why) => write!(f, "[OK]   {why}"),
+            Self::Waiting(why) => write!(f, "[WAIT] {why}"),
+            Self::Missing(why) => write!(f, "[MISS] {why}"),
+            Self::Failed(why) => write!(f, "[FAIL] {why}"),
+        }
+    }
+}
+
+fn relay_readiness(relay: &Service, tip: Option<&anyhow::Result<CardanoTip>>) -> Verdict {
+    if !relay.installed {
+        return Verdict::Missing(format!(
+            "{CARDANO_NODE_SERVICE} is not installed, run the `cardano` step"
+        ));
+    }
+    if !relay.is_active() {
+        return Verdict::Failed(format!(
+            "{CARDANO_NODE_SERVICE} is {state}, so the relay cannot sync; see `journalctl -u {CARDANO_NODE_SERVICE}`",
+            state = blank_as_unknown(&relay.active),
+        ));
+    }
+    match tip {
+        Some(Ok(tip)) => crate::check::cardano_readiness(tip).into(),
+        Some(Err(e)) => Verdict::Failed(format!(
+            "The relay is running but its tip could not be read: {e:#}"
+        )),
+        None => Verdict::Failed(String::from("The relay's tip was not queried")),
+    }
+}
+
+fn db_sync_readiness(
+    db_sync: &Service,
+    credentials: &anyhow::Result<DatabaseCredentials>,
+    db_block: Option<&anyhow::Result<u64>>,
+    tip: Option<&anyhow::Result<CardanoTip>>,
+    credentials_file: &std::path::Path,
+) -> Verdict {
+    if !db_sync.installed {
+        return Verdict::Missing(format!(
+            "{CARDANO_DB_SYNC_SERVICE} is not installed, run the `db-sync` step"
+        ));
+    }
+    if let Err(e) = credentials {
+        // The file is root-only, so a permission error is about who is asking, not about
+        // whether the stage ran
+        return match e.downcast_ref::<std::io::Error>().map(|io| io.kind()) {
+            Some(std::io::ErrorKind::NotFound) => Verdict::Missing(format!(
+                "The database credentials `{}` have not been saved, so db-sync cannot be checked; run the `db-sync` step",
+                credentials_file.display(),
+            )),
+            Some(std::io::ErrorKind::PermissionDenied) => Verdict::Failed(format!(
+                "The database credentials `{}` are root-only; run `status` with `sudo`",
+                credentials_file.display(),
+            )),
+            _ => Verdict::Failed(format!("The database credentials could not be read: {e:#}")),
+        };
+    }
+    if !db_sync.is_active() {
+        return Verdict::Failed(format!(
+            "{CARDANO_DB_SYNC_SERVICE} is {state}, so db-sync cannot catch up; see `journalctl -u {CARDANO_DB_SYNC_SERVICE}`",
+            state = blank_as_unknown(&db_sync.active),
+        ));
+    }
+    let db_block = match db_block {
+        Some(Ok(block)) => *block,
+        Some(Err(e)) => {
+            return Verdict::Failed(format!(
+                "db-sync is running but its database could not be queried: {e:#}"
+            ))
+        },
+        None => return Verdict::Failed(String::from("The db-sync database was not queried")),
+    };
+    match tip {
+        Some(Ok(tip)) => crate::check::db_sync_readiness(tip, db_block).into(),
+        _ => Verdict::Waiting(format!(
+            "db-sync has written block {db_block}, but without the relay's tip it cannot be told how far behind that is"
+        )),
+    }
 }
 
 fn blank_as_unknown(value: &str) -> &str {

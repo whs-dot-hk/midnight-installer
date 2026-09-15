@@ -3,6 +3,7 @@ use std::collections::HashMap;
 
 use crate::action::base::{CreateSystemdUnit, RequirePaths, StartSystemdUnit};
 use crate::action::midnight::{CreateValidatorEnvFile, PrepareSeedFiles};
+use crate::action::postgres::CheckDatabaseCredentials;
 use crate::action::{Action, StatefulAction};
 use crate::credentials::DatabaseCredentials;
 use crate::planner::{diff_from_default, require_root, require_user, units, Planner};
@@ -32,7 +33,9 @@ pub struct Validator {
 
     /// The password for the PostgreSQL role
     ///
-    /// Read from the credentials the db-sync stage saved if it is not given.
+    /// Read from the credentials the db-sync stage saved if it is not given, else asked for
+    /// at the terminal. Whatever it is, it is checked against PostgreSQL before the node is
+    /// given it.
     #[clap(long, env = "MIDNIGHT_INSTALLER_POSTGRES_PASSWORD")]
     pub postgres_password: Option<Secret>,
 
@@ -153,6 +156,9 @@ impl Planner for Validator {
             )
             .await?
             .boxed(),
+            // Likewise: a wrong password would not fail here, it would fail in the node's
+            // journal every ten seconds for ever while this stage reported success
+            CheckDatabaseCredentials::plan(&credentials).await?.boxed(),
             PrepareSeedFiles::plan(&paths.midnight_keys_dir, &self.common.midnight_user)
                 .await?
                 .boxed(),

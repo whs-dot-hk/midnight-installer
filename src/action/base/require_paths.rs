@@ -6,10 +6,12 @@ use crate::action::{Action, ActionDescription, StatefulAction};
 
 /** Check, at execute time, that the files a later step needs are in place
 
-The paths this names are produced by earlier actions, so within one plan it always passes.
-Planning a stage on its own is where it earns its keep: it fails with the name of the thing
-that is missing and the step which produces it, rather than letting a service fail to start
-minutes later for reasons the operator has to go and read the journal for.
+In a whole-host plan the paths this names are produced by earlier actions, so it always
+passes there. Installing a stage on its own is where it earns its keep: it fails, first and
+with the name of the thing that is missing and the step which produces it, rather than
+letting a service fail to start minutes later for reasons the operator has to go and read
+the journal for. Planning does not check, because the plan for one stage must be the same
+whether or not the stage before it has run yet.
 
 It changes nothing, so reverting it does nothing.
 */

@@ -1,4 +1,5 @@
 use std::collections::HashMap;
+use std::path::Path;
 
 use crate::action::base::{CreateDirectory, CreateSystemdUnit, StartSystemdUnit};
 use crate::action::cardano::{FetchMithrilSnapshot, InstallCardanoNode, InstallMithrilClient};
@@ -29,6 +30,7 @@ impl Planner for Cardano {
     async fn plan(&self) -> anyhow::Result<Vec<StatefulAction<Box<dyn Action>>>> {
         let paths = self.common.paths();
         let user = self.common.cardano_user.clone();
+        let bin_dir = crate::settings::user_bin_dir(&user)?;
         let mut actions: Vec<StatefulAction<Box<dyn Action>>> = vec![];
 
         if self.common.install_base_packages {
@@ -64,13 +66,22 @@ impl Planner for Cardano {
         actions.push(InstallCardanoNode::plan(&self.common).await?.boxed());
         actions.push(InstallMithrilClient::plan(&self.common).await?.boxed());
         actions.push(FetchMithrilSnapshot::plan(&self.common).await?.boxed());
-        actions.push(
+
+        // Restarted only when this plan changes what it runs: its unit, or its binary. A
+        // relay restarted for nothing replays its ledger for a good while before it serves
+        // a block again, and takes db-sync (which `Requires=` it) down with it.
+        let unit =
             CreateSystemdUnit::plan(CARDANO_NODE_SERVICE, units::cardano_node(&self.common)?)
-                .await?
-                .boxed(),
-        );
+                .await?;
+        let changed = unit.action.changed()
+            || !installed_version_matches(
+                &bin_dir.join("cardano-node"),
+                &self.common.cardano_node_version,
+            )
+            .await;
+        actions.push(unit.boxed());
         actions.push(
-            StartSystemdUnit::plan(CARDANO_NODE_SERVICE, true)
+            StartSystemdUnit::plan_restart_if(CARDANO_NODE_SERVICE, changed)
                 .await?
                 .boxed(),
         );
@@ -105,6 +116,29 @@ pub(crate) fn user_directories(user: &str) -> anyhow::Result<Vec<std::path::Path
         crate::settings::user_bin_dir(user)?,
         crate::settings::user_share_dir(user)?,
     ])
+}
+
+/// Whether the binary at `path` reports itself as `version`
+///
+/// The release archives are re-fetched on every run, so this is how a plan tells a refresh
+/// which changes the binary (and so has to restart the service) from one which does not.
+/// A binary which is missing or will not answer counts as not matching: restarting is the
+/// safe answer when nothing better is known.
+pub(crate) async fn installed_version_matches(path: &Path, version: &str) -> bool {
+    if !path.is_file() {
+        return false;
+    }
+
+    match crate::command(&path.display().to_string())
+        .arg("--version")
+        .output()
+        .await
+    {
+        Ok(output) if output.status.success() => {
+            String::from_utf8_lossy(&output.stdout).contains(version)
+        },
+        _ => false,
+    }
 }
 
 /// The packages every stage of the build-out assumes are present

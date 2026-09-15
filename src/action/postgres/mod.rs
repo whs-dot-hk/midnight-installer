@@ -1,5 +1,6 @@
 /*! Actions for the PostgreSQL instance `cardano-db-sync` and the Midnight node share */
 
+pub(crate) mod check_credentials;
 pub(crate) mod create_database;
 pub(crate) mod create_role;
 pub(crate) mod install_postgresql;
@@ -8,6 +9,7 @@ pub(crate) mod save_credentials;
 
 use anyhow::Context;
 
+pub use check_credentials::CheckDatabaseCredentials;
 pub use create_database::CreatePostgresDatabase;
 pub use create_role::CreatePostgresRole;
 pub use install_postgresql::InstallPostgresql;

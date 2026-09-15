@@ -209,6 +209,15 @@ pub struct CommonSettings {
     #[clap(long, env = "MIDNIGHT_INSTALLER_MIDNIGHT_SHA256", global = true)]
     pub midnight_sha256: Option<String>,
 
+    /** Install the `midnight-node` release from this local archive instead of downloading it
+
+    For a release this host cannot reach over the network: stage the `.tar.gz` on the host
+    out of band and point this at it. `--midnight-sha256` is then required, because a file
+    off the network is exactly the one whose contents nothing else has vouched for.
+    */
+    #[clap(long, env = "MIDNIGHT_INSTALLER_MIDNIGHT_ARCHIVE_PATH", global = true)]
+    pub midnight_archive_path: Option<PathBuf>,
+
     /// The `wireguard-tools` tag the FNO programme requires
     #[clap(
         long,
@@ -246,6 +255,7 @@ impl Default for CommonSettings {
             postgres_version: DEFAULT_POSTGRES_VERSION.into(),
             midnight_version: DEFAULT_MIDNIGHT_VERSION.into(),
             midnight_sha256: None,
+            midnight_archive_path: None,
             wireguard_tools_version: DEFAULT_WIREGUARD_TOOLS_VERSION.into(),
             install_base_packages: true,
         }
@@ -291,6 +301,16 @@ impl CommonSettings {
     }
 
     pub fn midnight_archive(&self) -> anyhow::Result<ReleaseArchive> {
+        // A staged archive wins over the published URL: it is set precisely when the release
+        // this host needs is not one it can download
+        if let Some(path) = &self.midnight_archive_path {
+            return ReleaseArchive::from_path(
+                path.clone(),
+                self.midnight_sha256.as_deref(),
+                "midnight-sha256",
+            );
+        }
+
         ReleaseArchive::new(
             format!(
                 "https://github.com/midnightntwrk/midnight-node/releases/download/node-{version}/midnight-node-{version}-linux-amd64.tar.gz",
@@ -345,6 +365,7 @@ impl CommonSettings {
             postgres_version,
             midnight_version,
             midnight_sha256,
+            midnight_archive_path,
             wireguard_tools_version,
             install_base_packages,
         } = self;
@@ -398,6 +419,14 @@ impl CommonSettings {
             serde_json::to_value(midnight_sha256)?,
         );
         map.insert(
+            "midnight_archive_path".into(),
+            serde_json::to_value(
+                midnight_archive_path
+                    .as_ref()
+                    .map(|path| path.display().to_string()),
+            )?,
+        );
+        map.insert(
             "wireguard_tools_version".into(),
             serde_json::to_value(wireguard_tools_version)?,
         );
@@ -417,9 +446,63 @@ versions this installer was built against. A version this installer does not kno
 checksum given, is refused rather than installed unverified.
 */
 #[derive(Debug, Clone, serde::Deserialize, serde::Serialize)]
+#[serde(from = "ReleaseArchiveRepr")]
 pub struct ReleaseArchive {
-    pub url: Url,
+    pub source: ArchiveSource,
     pub sha256: String,
+}
+
+/** The shapes a [`ReleaseArchive`] takes in a receipt
+
+Receipts written before archives could be staged on the host carry a bare `url` where the
+current ones carry a `source`. A receipt is what makes an install undoable, so the old shape
+is still read: the alternative is a host whose `uninstall` stops working on upgrade.
+*/
+#[derive(serde::Deserialize)]
+#[serde(untagged)]
+enum ReleaseArchiveRepr {
+    Current {
+        source: ArchiveSource,
+        sha256: String,
+    },
+    Legacy {
+        url: Url,
+        sha256: String,
+    },
+}
+
+impl From<ReleaseArchiveRepr> for ReleaseArchive {
+    fn from(repr: ReleaseArchiveRepr) -> Self {
+        match repr {
+            ReleaseArchiveRepr::Current { source, sha256 } => Self { source, sha256 },
+            ReleaseArchiveRepr::Legacy { url, sha256 } => Self {
+                source: ArchiveSource::Url(url),
+                sha256,
+            },
+        }
+    }
+}
+
+/** Where a release archive is read from
+
+A published release is downloaded from its URL. A release this host cannot reach over the
+network is staged on the host out of band and read from that path instead. Either way the
+checksum is verified before anything is installed, so the two differ only in transport.
+*/
+#[derive(Debug, Clone, serde::Deserialize, serde::Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ArchiveSource {
+    Url(Url),
+    Path(PathBuf),
+}
+
+impl std::fmt::Display for ArchiveSource {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Url(url) => write!(f, "{url}"),
+            Self::Path(path) => write!(f, "{}", path.display()),
+        }
+    }
 }
 
 impl ReleaseArchive {
@@ -433,19 +516,56 @@ impl ReleaseArchive {
             })
             .ok_or_else(|| {
                 anyhow::anyhow!("No SHA-256 is known for `{url}`, so it cannot be verified after download. Pass `--{flag}` with the checksum the project publishes for that release.")
-            })?
-            .trim()
-            .to_ascii_lowercase();
-
-        if sha256.len() != 64 || !sha256.bytes().all(|b| b.is_ascii_hexdigit()) {
-            anyhow::bail!("`{sha256}` is not a SHA-256: expected 64 hex digits");
-        }
+            })?;
 
         Ok(Self {
-            url: parse_url(url)?,
-            sha256,
+            source: ArchiveSource::Url(parse_url(url)?),
+            sha256: normalize_sha256(sha256)?,
         })
     }
+
+    /** A release archive already staged on this host
+
+    There is no published URL to look a checksum up against, so the operator has to supply
+    one: it is what makes a staged file as accountable as a downloaded one.
+    */
+    fn from_path(path: PathBuf, sha256: Option<&str>, flag: &str) -> anyhow::Result<Self> {
+        let sha256 = sha256.ok_or_else(|| {
+            anyhow::anyhow!(
+                "No SHA-256 was given for the staged archive `{}`, so it cannot be verified before it is installed from. Pass `--{flag}` with the checksum of the file you staged.",
+                path.display(),
+            )
+        })?;
+
+        // Checked while planning, not when the archive is finally read: by then the stages
+        // before this one have run, and a typo in a path is not worth a snapshot download
+        if !path.is_file() {
+            anyhow::bail!(
+                "The staged archive `{}` does not exist, or is not a file. Copy the release onto this host first, and point `--midnight-archive-path` at it.",
+                path.display(),
+            );
+        }
+        // Absolute, so the receipt does not depend on where the installer was run from
+        let path = path
+            .canonicalize()
+            .with_context(|| format!("Resolving the staged archive `{}`", path.display()))?;
+
+        Ok(Self {
+            source: ArchiveSource::Path(path),
+            sha256: normalize_sha256(sha256)?,
+        })
+    }
+}
+
+/// A SHA-256 as `sha256sum` prints it, rejected unless it is exactly 64 hex digits
+fn normalize_sha256(sha256: &str) -> anyhow::Result<String> {
+    let sha256 = sha256.trim().to_ascii_lowercase();
+
+    if sha256.len() != 64 || !sha256.bytes().all(|b| b.is_ascii_hexdigit()) {
+        anyhow::bail!("`{sha256}` is not a SHA-256: expected 64 hex digits");
+    }
+
+    Ok(sha256)
 }
 
 /** The Cardano epoch geometry the Midnight node needs to follow the main chain
@@ -627,4 +747,59 @@ pub fn user_share_dir(user: &str) -> anyhow::Result<PathBuf> {
 
 fn parse_url(url: String) -> anyhow::Result<Url> {
     Url::parse(&url).with_context(|| format!("Parsing URL `{url}`"))
+}
+
+#[cfg(test)]
+mod test {
+    use super::*;
+
+    const SHA256: &str = "f3d8816cd82adbcfa1b49a753e7e53b7131b3f0ce3eb70ee68c52e5df3f84e29";
+
+    #[test]
+    fn reads_a_receipt_written_before_archives_could_be_staged() {
+        let legacy = format!(r#"{{"url":"https://example.invalid/a.tar.gz","sha256":"{SHA256}"}}"#);
+        let archive: ReleaseArchive = serde_json::from_str(&legacy).unwrap();
+
+        assert!(
+            matches!(&archive.source, ArchiveSource::Url(url) if url.as_str() == "https://example.invalid/a.tar.gz")
+        );
+        assert_eq!(archive.sha256, SHA256);
+    }
+
+    #[test]
+    fn round_trips_the_current_receipt_shape() {
+        let archive = ReleaseArchive {
+            source: ArchiveSource::Path(PathBuf::from("/root/a.tar.gz")),
+            sha256: SHA256.into(),
+        };
+        let json = serde_json::to_string(&archive).unwrap();
+        let back: ReleaseArchive = serde_json::from_str(&json).unwrap();
+
+        assert!(
+            matches!(back.source, ArchiveSource::Path(path) if path == Path::new("/root/a.tar.gz"))
+        );
+        assert_eq!(back.sha256, SHA256);
+    }
+
+    #[test]
+    fn refuses_a_staged_archive_which_is_not_there() {
+        let temp_dir = tempfile::tempdir().unwrap();
+        let missing = temp_dir.path().join("midnight-node.tar.gz");
+
+        let err = ReleaseArchive::from_path(missing, Some(SHA256), "midnight-sha256").unwrap_err();
+        assert!(err.to_string().contains("does not exist"), "{err}");
+    }
+
+    #[test]
+    fn a_staged_archive_needs_a_checksum() {
+        let temp_dir = tempfile::tempdir().unwrap();
+        let staged = temp_dir.path().join("midnight-node.tar.gz");
+        std::fs::write(&staged, b"not really a tarball").unwrap();
+
+        let err = ReleaseArchive::from_path(staged.clone(), None, "midnight-sha256").unwrap_err();
+        assert!(err.to_string().contains("--midnight-sha256"), "{err}");
+
+        let archive = ReleaseArchive::from_path(staged, Some(SHA256), "midnight-sha256").unwrap();
+        assert!(matches!(archive.source, ArchiveSource::Path(path) if path.is_absolute()));
+    }
 }
