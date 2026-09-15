@@ -3,8 +3,8 @@ use std::process::ExitCode;
 use clap::Parser;
 
 use crate::{
-    cli::{subcommand::install::resolve_secrets, CommandExecute},
-    BuiltinPlanner,
+    cli::{subcommand::install::resolve_secrets, CommandExecute, APP},
+    planner::{with_planner, BuiltinPlanner},
 };
 
 /**
@@ -39,14 +39,9 @@ impl CommandExecute for Plan {
         } = self;
 
         resolve_secrets(&mut planner).await?;
-        let plan = planner.plan().await?;
 
-        if json {
-            println!("{}", serde_json::to_string_pretty(&plan)?);
-        } else {
-            println!("{}", plan.describe_install(explain).await?);
-        }
-
-        Ok(ExitCode::SUCCESS)
+        with_planner!(planner, |planner| {
+            installer::cli::subcommand::plan::run(&APP, planner, explain, json).await
+        })
     }
 }

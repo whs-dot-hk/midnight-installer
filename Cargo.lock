@@ -629,6 +629,33 @@ dependencies = [
 ]
 
 [[package]]
+name = "installer"
+version = "0.1.0"
+source = "git+https://github.com/swimming-bookstore/installer#30d9a11701c9f21533eefcb8351cdc369c64c7c6"
+dependencies = [
+ "anyhow",
+ "async-trait",
+ "clap",
+ "dyn-clone",
+ "flate2",
+ "nix",
+ "owo-colors",
+ "reqwest",
+ "rpassword",
+ "semver",
+ "serde",
+ "serde_json",
+ "sha2",
+ "tar",
+ "tokio",
+ "tracing",
+ "tracing-subscriber",
+ "typetag",
+ "url",
+ "walkdir",
+]
+
+[[package]]
 name = "inventory"
 version = "0.3.24"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -741,24 +768,16 @@ dependencies = [
  "anyhow",
  "async-trait",
  "clap",
- "dyn-clone",
- "flate2",
+ "installer",
  "nix",
- "owo-colors",
- "reqwest",
- "rpassword",
- "semver",
  "serde",
  "serde_json",
- "sha2",
- "tar",
  "tempfile",
  "tokio",
  "tracing",
  "tracing-subscriber",
  "typetag",
  "url",
- "walkdir",
 ]
 
 [[package]]

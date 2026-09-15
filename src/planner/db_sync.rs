@@ -1,7 +1,8 @@
 use anyhow::Context;
 use std::collections::HashMap;
+use std::path::PathBuf;
 
-use crate::action::base::{CreateDirectory, CreateSystemdUnit, RequirePaths, StartSystemdUnit};
+use crate::action::base::{CreateDirectory, CreateSystemdUnit, RequirePaths};
 use crate::action::dbsync::InstallCardanoDbSync;
 use crate::action::postgres::{
     CreatePgpassFile, CreatePostgresDatabase, CreatePostgresRole, InstallPostgresql,
@@ -10,8 +11,8 @@ use crate::action::postgres::{
 use crate::action::{Action, StatefulAction};
 use crate::credentials::DatabaseCredentials;
 use crate::planner::{
-    cardano::{base_packages, installed_version_matches},
-    diff_from_default, require_root, require_user, units, Planner,
+    cardano::{base_packages, installed_version_matches, start_or_restart, unit_differs},
+    diff_from_default, platform_check, require_root, require_user, units, Planner,
 };
 use crate::settings::{
     CommonSettings, Secret, CARDANO_DB_SYNC_SERVICE, CARDANO_NODE_SERVICE, DEFAULT_DB_NAME,
@@ -136,20 +137,20 @@ impl Planner for DbSync {
         // Restarted only when this plan changes what it runs: its unit, or its binary.
         // db-sync rolls back and revalidates after a restart, which a re-run that changed
         // nothing should not cost the host.
-        let unit = CreateSystemdUnit::plan(
-            CARDANO_DB_SYNC_SERVICE,
-            units::cardano_db_sync(&self.common, &credentials)?,
-        )
-        .await?;
-        let changed = unit.action.changed()
+        let unit = units::cardano_db_sync(&self.common, &credentials)?;
+        let changed = unit_differs(CARDANO_DB_SYNC_SERVICE, &unit).await
             || !installed_version_matches(
                 &bin_dir.join("cardano-db-sync"),
                 &self.common.db_sync_version,
             )
             .await;
-        actions.push(unit.boxed());
         actions.push(
-            StartSystemdUnit::plan_restart_if(CARDANO_DB_SYNC_SERVICE, changed)
+            CreateSystemdUnit::plan(CARDANO_DB_SYNC_SERVICE, unit)
+                .await?
+                .boxed(),
+        );
+        actions.push(
+            start_or_restart(CARDANO_DB_SYNC_SERVICE, changed)
                 .await?
                 .boxed(),
         );
@@ -174,8 +175,12 @@ impl Planner for DbSync {
         diff_from_default(self).await
     }
 
-    fn common_settings(&self) -> &CommonSettings {
-        &self.common
+    fn receipt_path(&self) -> PathBuf {
+        self.common.paths().receipt(self.typetag_name())
+    }
+
+    async fn platform_check(&self) -> anyhow::Result<()> {
+        platform_check(self.typetag_name())
     }
 
     async fn pre_install_check(&self) -> anyhow::Result<()> {

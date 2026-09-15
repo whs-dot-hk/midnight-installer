@@ -28,65 +28,22 @@ pub mod units;
 pub mod validator;
 pub mod wireguard;
 
-use std::collections::HashMap;
+use crate::settings::CommonSettings;
 
-use crate::{action::StatefulAction, settings::CommonSettings, Action, InstallPlan};
+pub use installer::planner::{diff_from_default, Planner};
 
-/// Something which can produce an [`InstallPlan`](crate::InstallPlan)
-#[async_trait::async_trait]
-#[typetag::serde(tag = "planner")]
-pub trait Planner: std::fmt::Debug + Send + Sync + dyn_clone::DynClone {
-    /// Instantiate the planner with default settings, if possible
-    async fn default() -> anyhow::Result<Self>
-    where
-        Self: Sized;
+// The gates every planner in this crate shares. The `Planner` trait's own defaults are
+// no-ops, because the framework knows nothing about what a product's stages need; these are
+// what every FNO stage needs, and every implementation below calls them.
 
-    /// Plan the [`Action`]s this component needs
-    async fn plan(&self) -> anyhow::Result<Vec<StatefulAction<Box<dyn Action>>>>;
-
-    /// Every setting in force, for `--explain` and for the receipt
-    fn settings(&self) -> anyhow::Result<HashMap<String, serde_json::Value>>;
-
-    /// Only the settings which differ from the defaults, for the plan description
-    async fn configured_settings(&self) -> anyhow::Result<HashMap<String, serde_json::Value>>;
-
-    /// The settings every planner shares, which is where the data root (and so the receipt
-    /// location) comes from
-    fn common_settings(&self) -> &CommonSettings;
-
-    fn boxed(self) -> Box<dyn Planner>
-    where
-        Self: Sized + 'static,
-    {
-        Box::new(self)
+/// This installer only builds `x86_64` Linux hosts
+pub(crate) fn platform_check(planner: &str) -> anyhow::Result<()> {
+    use std::env::consts::{ARCH, OS};
+    if (ARCH, OS) != ("x86_64", "linux") {
+        anyhow::bail!("The `{planner}` planner does not support {ARCH} {OS}");
     }
-
-    /// Whether this planner can run on this machine at all
-    async fn platform_check(&self) -> anyhow::Result<()> {
-        use std::env::consts::{ARCH, OS};
-        if (ARCH, OS) != ("x86_64", "linux") {
-            anyhow::bail!(
-                "The `{}` planner does not support {ARCH} {OS}",
-                self.typetag_name()
-            );
-        }
-        Ok(())
-    }
-
-    /// The gates which must hold before this component may be installed
-    ///
-    /// Every stage changes the system, so every stage needs root; planners with further
-    /// gates call [`require_root`] first.
-    async fn pre_install_check(&self) -> anyhow::Result<()> {
-        require_root()
-    }
-
-    async fn pre_uninstall_check(&self) -> anyhow::Result<()> {
-        Ok(())
-    }
+    Ok(())
 }
-
-dyn_clone::clone_trait_object!(Planner);
 
 /// Planning inspects the machine the way an install would, so it needs the same privileges
 pub(crate) fn require_root() -> anyhow::Result<()> {
@@ -128,18 +85,6 @@ pub enum BuiltinPlanner {
 }
 
 impl BuiltinPlanner {
-    pub async fn plan(self) -> anyhow::Result<InstallPlan> {
-        match self {
-            Self::All(planner) => InstallPlan::plan(planner).await,
-            Self::Directories(planner) => InstallPlan::plan(planner).await,
-            Self::Cardano(planner) => InstallPlan::plan(planner).await,
-            Self::DbSync(planner) => InstallPlan::plan(planner).await,
-            Self::Midnight(planner) => InstallPlan::plan(planner).await,
-            Self::Wireguard(planner) => InstallPlan::plan(planner).await,
-            Self::Validator(planner) => InstallPlan::plan(planner).await,
-        }
-    }
-
     pub fn common_settings(&self) -> &CommonSettings {
         match self {
             Self::All(planner) => planner.common(),
@@ -166,22 +111,24 @@ impl BuiltinPlanner {
     }
 }
 
-/// Only the settings which differ from this planner type's defaults
-pub(crate) async fn diff_from_default<P>(
-    planner: &P,
-) -> anyhow::Result<HashMap<String, serde_json::Value>>
-where
-    P: Planner + Sized,
-{
-    let default = P::default().await?.settings()?;
-    let configured = planner.settings()?;
+/** Run `$body` with the concrete planner inside a [`BuiltinPlanner`]
 
-    let mut settings = HashMap::new();
-    for (key, value) in configured.into_iter() {
-        if default.get(&key) != Some(&value) {
-            settings.insert(key, value);
+The framework's `plan` / `install` / `uninstall` runners take a concrete `P: Planner`, so
+that a planner keeps its own type all the way to its receipt. This is the one place the
+stage chosen on the command line is turned back into that type.
+*/
+macro_rules! with_planner {
+    ($planner:expr, |$bound:ident| $body:block) => {
+        match $planner {
+            $crate::planner::BuiltinPlanner::All($bound) => $body,
+            $crate::planner::BuiltinPlanner::Directories($bound) => $body,
+            $crate::planner::BuiltinPlanner::Cardano($bound) => $body,
+            $crate::planner::BuiltinPlanner::DbSync($bound) => $body,
+            $crate::planner::BuiltinPlanner::Midnight($bound) => $body,
+            $crate::planner::BuiltinPlanner::Wireguard($bound) => $body,
+            $crate::planner::BuiltinPlanner::Validator($bound) => $body,
         }
-    }
-
-    Ok(settings)
+    };
 }
+
+pub(crate) use with_planner;

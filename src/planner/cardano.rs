@@ -1,10 +1,12 @@
 use std::collections::HashMap;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 use crate::action::base::{CreateDirectory, CreateSystemdUnit, StartSystemdUnit};
 use crate::action::cardano::{FetchMithrilSnapshot, InstallCardanoNode, InstallMithrilClient};
 use crate::action::{Action, StatefulAction};
-use crate::planner::{diff_from_default, require_root, require_user, units, Planner};
+use crate::planner::{
+    diff_from_default, platform_check, require_root, require_user, units, Planner,
+};
 use crate::settings::{CommonSettings, CARDANO_NODE_SERVICE};
 
 /** The Cardano relay: binaries, a Mithril bootstrap, and the service
@@ -70,18 +72,20 @@ impl Planner for Cardano {
         // Restarted only when this plan changes what it runs: its unit, or its binary. A
         // relay restarted for nothing replays its ledger for a good while before it serves
         // a block again, and takes db-sync (which `Requires=` it) down with it.
-        let unit =
-            CreateSystemdUnit::plan(CARDANO_NODE_SERVICE, units::cardano_node(&self.common)?)
-                .await?;
-        let changed = unit.action.changed()
+        let unit = units::cardano_node(&self.common)?;
+        let changed = unit_differs(CARDANO_NODE_SERVICE, &unit).await
             || !installed_version_matches(
                 &bin_dir.join("cardano-node"),
                 &self.common.cardano_node_version,
             )
             .await;
-        actions.push(unit.boxed());
         actions.push(
-            StartSystemdUnit::plan_restart_if(CARDANO_NODE_SERVICE, changed)
+            CreateSystemdUnit::plan(CARDANO_NODE_SERVICE, unit)
+                .await?
+                .boxed(),
+        );
+        actions.push(
+            start_or_restart(CARDANO_NODE_SERVICE, changed)
                 .await?
                 .boxed(),
         );
@@ -97,8 +101,12 @@ impl Planner for Cardano {
         diff_from_default(self).await
     }
 
-    fn common_settings(&self) -> &CommonSettings {
-        &self.common
+    fn receipt_path(&self) -> PathBuf {
+        self.common.paths().receipt(self.typetag_name())
+    }
+
+    async fn platform_check(&self) -> anyhow::Result<()> {
+        platform_check(self.typetag_name())
     }
 
     async fn pre_install_check(&self) -> anyhow::Result<()> {
@@ -159,4 +167,29 @@ pub(crate) async fn base_packages() -> anyhow::Result<StatefulAction<Box<dyn Act
     ])
     .await?
     .boxed())
+}
+
+/// Whether applying `rendered` would leave a different unit file than the one on disk
+pub(crate) async fn unit_differs(unit: &str, rendered: &str) -> bool {
+    match tokio::fs::read_to_string(crate::action::base::unit_path(unit)).await {
+        Ok(existing) => existing != rendered,
+        Err(_) => true,
+    }
+}
+
+/** Restart the unit if this plan changes what it runs, else only enable and start it
+
+For a service which is expensive to bounce: a relay restarted for no reason replays its
+ledger for a good while before it serves a block again, so a re-run which changed neither
+its unit nor its binary leaves it alone.
+*/
+pub(crate) async fn start_or_restart(
+    unit: &str,
+    changed: bool,
+) -> anyhow::Result<StatefulAction<StartSystemdUnit>> {
+    if changed {
+        StartSystemdUnit::plan_restart(unit).await
+    } else {
+        StartSystemdUnit::plan(unit, true).await
+    }
 }
