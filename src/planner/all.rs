@@ -12,12 +12,13 @@ they run rather than when they are planned.
 */
 
 use std::collections::{HashMap, HashSet};
+use std::path::PathBuf;
 
 use crate::action::{Action, StatefulAction};
 use crate::planner::{
     cardano::Cardano, db_sync::DbSync, diff_from_default, directories::Directories,
-    midnight::Midnight, require_root, require_user, validator::Validator, wireguard::Wireguard,
-    Planner,
+    midnight::Midnight, platform_check, require_root, require_user, validator::Validator,
+    wireguard::Wireguard, Planner,
 };
 use crate::settings::CommonSettings;
 
@@ -157,8 +158,12 @@ impl Planner for All {
         diff_from_default(self).await
     }
 
-    fn common_settings(&self) -> &CommonSettings {
-        self.common()
+    fn receipt_path(&self) -> PathBuf {
+        self.common().paths().receipt(self.typetag_name())
+    }
+
+    async fn platform_check(&self) -> anyhow::Result<()> {
+        platform_check(self.typetag_name())
     }
 
     async fn pre_install_check(&self) -> anyhow::Result<()> {
@@ -173,8 +178,14 @@ impl Planner for All {
 /// The state is left out: whether the machine already had a directory says nothing about
 /// whether two stages meant the same directory.
 fn identity(action: &StatefulAction<Box<dyn Action>>) -> anyhow::Result<serde_json::Value> {
-    serde_json::to_value(&action.action)
-        .map_err(|e| anyhow::anyhow!("Describing `{}`: {e}", action.tracing_synopsis()))
+    // A `StatefulAction` serializes as `{"action": .., "state": ..}`, and it is the action
+    // half which says what the step is
+    let mut value = serde_json::to_value(action)
+        .map_err(|e| anyhow::anyhow!("Describing `{}`: {e}", action.tracing_synopsis()))?;
+    Ok(match value.get_mut("action") {
+        Some(inner) => inner.take(),
+        None => value,
+    })
 }
 
 #[cfg(test)]

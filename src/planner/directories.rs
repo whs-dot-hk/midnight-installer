@@ -1,8 +1,9 @@
 use std::collections::HashMap;
+use std::path::PathBuf;
 
 use crate::action::base::CreateDirectory;
 use crate::action::{Action, StatefulAction};
-use crate::planner::{diff_from_default, require_root, require_user, Planner};
+use crate::planner::{diff_from_default, platform_check, require_root, require_user, Planner};
 use crate::settings::CommonSettings;
 
 /** The `/data` layout every later stage writes into
@@ -75,8 +76,12 @@ impl Planner for Directories {
         diff_from_default(self).await
     }
 
-    fn common_settings(&self) -> &CommonSettings {
-        &self.common
+    fn receipt_path(&self) -> PathBuf {
+        self.common.paths().receipt(self.typetag_name())
+    }
+
+    async fn platform_check(&self) -> anyhow::Result<()> {
+        platform_check(self.typetag_name())
     }
 
     async fn pre_install_check(&self) -> anyhow::Result<()> {

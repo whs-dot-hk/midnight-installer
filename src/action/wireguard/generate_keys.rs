@@ -3,7 +3,7 @@ use std::path::PathBuf;
 
 use tracing::{span, Span};
 
-use crate::action::{Action, ActionDescription, ActionState, StatefulAction};
+use crate::action::{planned, Action, ActionDescription, ActionState, StatefulAction};
 use crate::util::file_has_contents;
 
 /** Generate this host's WireGuard identity, and report the public half
@@ -48,10 +48,7 @@ impl GenerateWireguardKeys {
             (true, false) | (false, false) => ActionState::Uncompleted,
         };
 
-        Ok(StatefulAction {
-            action: this,
-            state,
-        })
+        Ok(planned(this, state))
     }
 }
 

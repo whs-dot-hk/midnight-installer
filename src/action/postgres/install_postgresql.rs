@@ -4,7 +4,7 @@ use tracing::{span, Span};
 use url::Url;
 
 use crate::action::base::{package_installed, AptInstall, ConfigureAptRepository};
-use crate::action::{Action, ActionDescription, ActionState, StatefulAction};
+use crate::action::{planned, Action, ActionDescription, ActionState, StatefulAction};
 use crate::settings::CommonSettings;
 
 const PGDG_KEY_URL: &str = "https://www.postgresql.org/media/keys/ACCC4CF8.asc";
@@ -54,14 +54,14 @@ impl InstallPostgresql {
             ActionState::Uncompleted
         };
 
-        Ok(StatefulAction {
-            action: Self {
+        Ok(planned(
+            Self {
                 version,
                 repository,
                 packages,
             },
             state,
-        })
+        ))
     }
 }
 

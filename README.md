@@ -9,7 +9,12 @@ be inspected before they run, and receipts that can undo them afterwards.
 
 ## Why it is shaped this way
 
-Three concepts carry the whole crate:
+The machinery is the [`installer`](https://github.com/swimming-bookstore/installer)
+framework: actions, plans, receipts, and the `plan` / `install` / `uninstall` CLI. This crate
+supplies what is specific to an FNO host — the planners, the actions they are built from,
+the settings, and `status`.
+
+Three concepts, all of them the framework's, carry it:
 
 - **`Action`** — one executable, revertable step (`CreateDirectory`, `InstallBinary`,
   `StartSystemdUnit`, `FetchMithrilSnapshot`). Some are composites which orchestrate

@@ -3,7 +3,7 @@ use std::path::PathBuf;
 use tracing::{span, Span};
 use url::Url;
 
-use crate::action::{Action, ActionDescription, ActionState, StatefulAction};
+use crate::action::{planned, Action, ActionDescription, ActionState, StatefulAction};
 use crate::settings::CommonSettings;
 use crate::util::{chown_recursive, directory_has_contents, gid_of, uid_of};
 
@@ -51,10 +51,7 @@ impl FetchMithrilSnapshot {
             ActionState::Uncompleted
         };
 
-        Ok(StatefulAction {
-            action: this,
-            state,
-        })
+        Ok(planned(this, state))
     }
 }
 

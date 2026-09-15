@@ -4,7 +4,7 @@ use std::path::PathBuf;
 use tracing::{span, Span};
 
 use crate::action::midnight::NodeInvocation;
-use crate::action::{Action, ActionDescription, ActionState, StatefulAction};
+use crate::action::{planned, Action, ActionDescription, ActionState, StatefulAction};
 use crate::util::file_has_contents;
 
 /// The signature schemes the Midnight validator keys use
@@ -72,10 +72,7 @@ impl GenerateValidatorKey {
             ActionState::Uncompleted
         };
 
-        Ok(StatefulAction {
-            action: this,
-            state,
-        })
+        Ok(planned(this, state))
     }
 }
 
@@ -195,10 +192,7 @@ impl GenerateNetworkKey {
             ActionState::Uncompleted
         };
 
-        Ok(StatefulAction {
-            action: this,
-            state,
-        })
+        Ok(planned(this, state))
     }
 }
 

@@ -3,7 +3,7 @@ use anyhow::Context;
 use tracing::{span, Span};
 
 use crate::action::base::AptInstall;
-use crate::action::{Action, ActionDescription, ActionState, StatefulAction};
+use crate::action::{planned, Action, ActionDescription, ActionState, StatefulAction};
 
 const WIREGUARD_TOOLS_REPOSITORY: &str = "https://git.zx2c4.com/wireguard-tools";
 
@@ -42,13 +42,13 @@ impl InstallWireguardTools {
             None => ActionState::Uncompleted,
         };
 
-        Ok(StatefulAction {
-            action: Self {
+        Ok(planned(
+            Self {
                 version,
                 build_dependencies,
             },
             state,
-        })
+        ))
     }
 }
 

@@ -1,22 +1,29 @@
-/*! The command line: `plan`, `install`, `uninstall`, `status` */
+/*! The command line: `plan`, `install`, `uninstall`, `status`
+
+The framework owns the machinery — confirmation, `sudo`, signal handling, receipts — and
+this module owns what is specific to this product: the clap tree whose subcommands are the
+FNO stages, the secrets those stages need asked for, and the `status` report the framework
+knows nothing about.
+*/
 
 pub(crate) mod arg;
-pub(crate) mod interaction;
 pub(crate) mod subcommand;
 
-use std::{ffi::CString, process::ExitCode};
+use std::process::ExitCode;
 
-use anyhow::Context;
 use clap::Parser;
-use owo_colors::OwoColorize;
-use tokio::sync::broadcast::{Receiver, Sender};
 
 use self::subcommand::MidnightInstallerSubcommand;
 
-#[async_trait::async_trait]
-pub trait CommandExecute {
-    async fn execute(self) -> anyhow::Result<ExitCode>;
-}
+pub use installer::cli::{interaction, App, CommandExecute};
+
+/// Who this installer is, for receipts, `sudo`, and the header of every plan
+pub const APP: App = App {
+    product: "Midnight FNO",
+    binary_name: "midnight-installer",
+    version: env!("CARGO_PKG_VERSION"),
+    env_prefix: "MIDNIGHT_INSTALLER",
+};
 
 /**
 The Midnight federated-node-operator installer
@@ -47,83 +54,7 @@ impl CommandExecute for MidnightInstallerCli {
     }
 }
 
-/// A channel which fires when the operator interrupts us, so an install can stop between
-/// actions rather than in the middle of one
-pub(crate) fn signal_channel() -> anyhow::Result<(Sender<()>, Receiver<()>)> {
-    let (sender, receiver) = tokio::sync::broadcast::channel(100);
-
-    let mut interrupt = tokio::signal::unix::signal(tokio::signal::unix::SignalKind::interrupt())
-        .context("Installing the SIGINT handler")?;
-    let mut terminate = tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate())
-        .context("Installing the SIGTERM handler")?;
-
-    let sender_cloned = sender.clone();
-    tokio::spawn(async move {
-        loop {
-            tokio::select! {
-                Some(()) = interrupt.recv() => {
-                    tracing::warn!("Got SIGINT, stopping after this step");
-                    sender_cloned.send(()).ok();
-                },
-                Some(()) = terminate.recv() => {
-                    tracing::warn!("Got SIGTERM, stopping after this step");
-                    sender_cloned.send(()).ok();
-                },
-            }
-        }
-    });
-
-    Ok((sender, receiver))
-}
-
 /// Re-run ourselves under `sudo` if we are not already root
 pub fn ensure_root() -> anyhow::Result<()> {
-    if crate::check::is_root() {
-        return Ok(());
-    }
-
-    eprintln!(
-        "{}",
-        "`midnight-installer` needs to run as `root`, escalating with `sudo`..."
-            .yellow()
-            .dimmed()
-    );
-
-    let mut arguments = vec![
-        CString::new("sudo").context("Building the `sudo` argument")?,
-        CString::new("--set-home").context("Building the `--set-home` argument")?,
-    ];
-
-    // `sudo` drops the environment, so the few variables which configure this installer are
-    // carried across deliberately. Only their names are named here: a value passed as
-    // `env KEY=VALUE` would be visible in the process list and in sudo's own log, and one of
-    // them may be the database password.
-    let preserved: Vec<String> = std::env::vars_os()
-        .filter_map(|(key, _)| key.into_string().ok())
-        .filter(|key| {
-            matches!(key.as_str(), "RUST_LOG" | "RUST_BACKTRACE" | "SHELL")
-                || key.starts_with("MIDNIGHT_INSTALLER")
-                || key.starts_with("http_proxy")
-                || key.starts_with("https_proxy")
-                || key.starts_with("HTTP_PROXY")
-                || key.starts_with("HTTPS_PROXY")
-        })
-        .collect();
-
-    if !preserved.is_empty() {
-        arguments.push(
-            CString::new(format!("--preserve-env={}", preserved.join(",")))
-                .context("Building the `--preserve-env` argument")?,
-        );
-    }
-
-    for argument in std::env::args() {
-        arguments.push(CString::new(argument).context("Building an argument")?);
-    }
-
-    let sudo = CString::new("sudo").context("Building the `sudo` program name")?;
-    tracing::trace!("Executing `{sudo:?}` with `{arguments:?}`");
-    nix::unistd::execvp(&sudo, &arguments).context("Re-running this installer under `sudo`")?;
-
-    Ok(())
+    installer::cli::ensure_root(&APP)
 }

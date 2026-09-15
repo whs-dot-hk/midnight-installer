@@ -1,16 +1,10 @@
 use std::{path::PathBuf, process::ExitCode};
 
-use anyhow::Context;
 use clap::{ArgAction, Parser};
-use owo_colors::OwoColorize;
 
 use crate::{
-    cli::{
-        ensure_root,
-        interaction::{self, PromptChoice},
-        signal_channel, CommandExecute,
-    },
-    BuiltinPlanner, InstallPlan,
+    cli::{CommandExecute, APP},
+    planner::BuiltinPlanner,
 };
 
 /**
@@ -60,55 +54,29 @@ impl CommandExecute for Uninstall {
             stage,
         } = self;
 
-        ensure_root()?;
-
         let receipt_path = match (receipt, stage) {
             (Some(receipt), _) => receipt,
-            (None, Some(stage)) => stage
-                .common_settings()
-                .paths()
-                .receipt(stage.typetag_name()),
+            (None, Some(stage)) => {
+                let path = stage
+                    .common_settings()
+                    .paths()
+                    .receipt(stage.typetag_name());
+                // The framework reports a missing receipt too, but it cannot know the one
+                // thing an operator here most often has wrong: the stage was installed as
+                // part of `all`, whose receipt is the one to follow
+                if !path.exists() {
+                    anyhow::bail!(
+                        "No receipt `{path}`. Nothing was installed from here, it was installed with a different data root, or it was installed as part of `all`, whose receipt is `all.json` and which `uninstall all` follows.",
+                        path = path.display()
+                    );
+                }
+                path
+            },
             (None, None) => {
                 anyhow::bail!("Name the stage to undo, or pass `--receipt` with the path to one")
             },
         };
 
-        let contents = tokio::fs::read_to_string(&receipt_path)
-            .await
-            .with_context(|| {
-                format!(
-                    "Reading the receipt `{path}`. Nothing was installed from here, it was installed with a different data root, or it was installed as part of `all`, whose receipt is `all.json` and which `uninstall all` follows.",
-                    path = receipt_path.display()
-                )
-            })?;
-        let mut plan: InstallPlan = serde_json::from_str(&contents).with_context(|| {
-            format!(
-                "Parsing the receipt `{path}`; it may have been written by an incompatible version of this installer",
-                path = receipt_path.display()
-            )
-        })?;
-
-        if !no_confirm {
-            let mut currently_explaining = explain;
-            loop {
-                match interaction::prompt(
-                    plan.describe_uninstall(currently_explaining).await?,
-                    PromptChoice::No,
-                    currently_explaining,
-                )? {
-                    PromptChoice::Yes => break,
-                    PromptChoice::Explain => currently_explaining = true,
-                    PromptChoice::No => {
-                        interaction::clean_exit_with_message("Nothing was undone. Bye!")
-                    },
-                }
-            }
-        }
-
-        let (_tx, rx) = signal_channel()?;
-        plan.uninstall(rx).await?;
-
-        println!("{}", "Undone.".bold());
-        Ok(ExitCode::SUCCESS)
+        installer::cli::subcommand::uninstall::run(&APP, receipt_path, no_confirm, explain).await
     }
 }

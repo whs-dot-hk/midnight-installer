@@ -1,16 +1,11 @@
 use std::process::ExitCode;
 
 use clap::{ArgAction, Parser};
-use owo_colors::OwoColorize;
 
 use crate::{
-    cli::{
-        ensure_root,
-        interaction::{self, PromptChoice},
-        signal_channel, CommandExecute,
-    },
+    cli::{ensure_root, interaction, CommandExecute, APP},
+    planner::{with_planner, BuiltinPlanner},
     settings::Secret,
-    BuiltinPlanner, InstallPlan,
 };
 
 /**
@@ -54,79 +49,23 @@ impl CommandExecute for Install {
             mut planner,
         } = self;
 
+        // Before the password is asked for, not after: escalating replaces this process, and
+        // would take anything typed at the terminal with it
         ensure_root()?;
         resolve_secrets(&mut planner).await?;
 
-        let stage = planner.typetag_name();
-        let mut plan = planner.plan().await?;
-
-        if !no_confirm {
-            let mut currently_explaining = explain;
-            loop {
-                match interaction::prompt(
-                    plan.describe_install(currently_explaining).await?,
-                    PromptChoice::Yes,
-                    currently_explaining,
-                )? {
-                    PromptChoice::Yes => break,
-                    PromptChoice::Explain => currently_explaining = true,
-                    PromptChoice::No => {
-                        interaction::clean_exit_with_message("Nothing was changed. Bye!")
-                    },
-                }
-            }
-        }
-
-        let (tx, rx) = signal_channel()?;
-
-        match plan.install(rx).await {
-            Ok(()) => {
-                println!("{}", format!("The `{stage}` stage is done.").bold());
-                println!("Receipt: {}", plan.receipt_path().display());
-                for note in next_steps(stage) {
-                    println!("{note}");
-                }
-                Ok(ExitCode::SUCCESS)
-            },
-            Err(err) => handle_failure(&mut plan, err, no_confirm, explain, tx).await,
-        }
+        let next_steps = next_steps(planner.typetag_name());
+        with_planner!(planner, |planner| {
+            installer::cli::subcommand::install::run(
+                &APP,
+                planner,
+                no_confirm,
+                explain,
+                &next_steps,
+            )
+            .await
+        })
     }
-}
-
-/// Offer to undo what was applied, the way the stage would have been undone later
-async fn handle_failure(
-    plan: &mut InstallPlan,
-    err: anyhow::Error,
-    no_confirm: bool,
-    explain: bool,
-    tx: tokio::sync::broadcast::Sender<()>,
-) -> anyhow::Result<ExitCode> {
-    eprintln!("{}", format!("{err:?}").red());
-
-    if no_confirm {
-        return Ok(ExitCode::FAILURE);
-    }
-
-    eprintln!("{}", "The stage did not finish; it can be reverted.".red());
-
-    let mut currently_explaining = explain;
-    loop {
-        match interaction::prompt(
-            plan.describe_uninstall(currently_explaining).await?,
-            PromptChoice::Yes,
-            currently_explaining,
-        )? {
-            PromptChoice::Yes => break,
-            PromptChoice::Explain => currently_explaining = true,
-            PromptChoice::No => interaction::clean_exit_with_message(
-                "Leaving what was applied in place. Its receipt is written, so `uninstall` can still undo it.",
-            ),
-        }
-    }
-
-    plan.uninstall(tx.subscribe()).await?;
-    println!("{}", "What was applied has been reverted.".bold());
-    Ok(ExitCode::FAILURE)
 }
 
 /** Ask for what only a person can supply
