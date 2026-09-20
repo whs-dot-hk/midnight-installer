@@ -115,7 +115,11 @@ impl Planner for DbSync {
         actions.push(RelocatePostgresCluster::plan(&self.common).await?.boxed());
         actions.push(CreatePostgresRole::plan(&credentials).await?.boxed());
         actions.push(CreatePostgresDatabase::plan(&credentials).await?.boxed());
-        actions.push(CreatePgpassFile::plan(&user, &credentials).await?.boxed());
+        actions.push(
+            CreatePgpassFile::plan(&paths.postgres_pgpass_file, &user, &credentials)
+                .await?
+                .boxed(),
+        );
         actions.push(
             SaveDatabaseCredentials::plan(&paths.postgres_credentials_file, &credentials)
                 .await?

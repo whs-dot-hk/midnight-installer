@@ -55,7 +55,7 @@ pub fn cardano_db_sync(
     let paths = settings.paths();
     let user = &settings.cardano_user;
     let bin_dir = crate::settings::user_bin_dir(user)?;
-    let pgpass = crate::settings::user_home(user)?.join(".pgpass");
+    let pgpass = &paths.postgres_pgpass_file;
 
     Ok(format!(
         "\
@@ -165,6 +165,26 @@ mod test {
     by a systemd drop-in holding a stale copy of `ExecStart`, and a host ran that way for
     three days. `VerifySecretFlags` catches the drop-in; this catches the unit.
     */
+    /// `cardano-db-sync` cannot find a `.pgpass` outside `$HOME` on its own
+    #[test]
+    fn the_db_sync_unit_points_pgpassfile_at_the_secret_root() {
+        let settings = CommonSettings {
+            cardano_user: String::from("root"),
+            secret_root: std::path::PathBuf::from("/secret"),
+            ..CommonSettings::default()
+        };
+
+        let credentials = crate::credentials::DatabaseCredentials::new(
+            "midnight",
+            "cexplorer",
+            crate::settings::Secret::new("unused"),
+        );
+
+        let unit = cardano_db_sync(&settings, &credentials).unwrap();
+
+        assert!(unit.contains("PGPASSFILE=/secret/pgpass"), "{unit}");
+    }
+
     #[test]
     fn the_validator_unit_names_the_secret_root_paths() {
         let settings = CommonSettings {

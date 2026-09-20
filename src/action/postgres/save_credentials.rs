@@ -85,7 +85,12 @@ impl Action for SaveDatabaseCredentials {
     }
 }
 
-/// Write the service user's `~/.pgpass`, which is how `cardano-db-sync` authenticates
+/** Write the `.pgpass` `cardano-db-sync` authenticates with
+
+It lives under the secret root rather than in the service user's home, so it is backed up
+with every other secret. libpq looks only at `~/.pgpass` unless `PGPASSFILE` names another
+path, which the unit does.
+*/
 #[derive(Debug, serde::Deserialize, serde::Serialize, Clone)]
 #[serde(tag = "action_name", rename = "create_pgpass_file")]
 pub struct CreatePgpassFile {
@@ -98,15 +103,13 @@ pub struct CreatePgpassFile {
 impl CreatePgpassFile {
     #[tracing::instrument(level = "debug", skip_all)]
     pub async fn plan(
+        path: impl Into<PathBuf>,
         user: impl Into<String>,
         credentials: &DatabaseCredentials,
     ) -> anyhow::Result<StatefulAction<Self>> {
-        let user = user.into();
-        let home = crate::settings::user_home(&user)?;
-
         Ok(StatefulAction::uncompleted(Self {
-            path: home.join(".pgpass"),
-            user,
+            path: path.into(),
+            user: user.into(),
             // db-sync connects over the Unix socket, so the `.pgpass` entry has to name the
             // socket directory, not `localhost`
             host_entry: String::from("/var/run/postgresql"),
