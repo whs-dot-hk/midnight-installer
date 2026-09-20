@@ -550,6 +550,7 @@ pub struct Paths {
     pub mithril_tools: PathBuf,
     pub postgres_data: PathBuf,
     pub postgres_credentials_file: PathBuf,
+    pub postgres_pgpass_file: PathBuf,
     pub midnight_data: PathBuf,
     pub midnight_node_data: PathBuf,
     pub midnight_keys_dir: PathBuf,
@@ -587,6 +588,9 @@ impl Paths {
             cardano_db_sync_config: cardano_data.join("db-sync-config.json"),
             mithril_tools: cardano_data.join("mithril-tools"),
             postgres_credentials_file: secret_root.join("fno-db-credentials.env"),
+            // libpq reads `~/.pgpass` and nothing else unless `PGPASSFILE` names a
+            // path, which the `cardano-db-sync` unit does. See `planner::units`.
+            postgres_pgpass_file: secret_root.join("pgpass"),
             midnight_keys_dir: secret_root.join("keys"),
             midnight_res_dir: midnight_node_data.join("res"),
             midnight_registration_file: midnight_node_data.join("partner-chains-public-keys.json"),
@@ -700,6 +704,7 @@ mod test {
         let paths = Paths::new("/data", "/secret", "preprod");
 
         for secret in [
+            &paths.postgres_pgpass_file,
             &paths.midnight_keys_dir,
             &paths.midnight_network_dir,
             &paths.midnight_keystore_dir,

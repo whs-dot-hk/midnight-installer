@@ -153,7 +153,8 @@ Read the uninstall plan (`--explain`) before confirming; it names every one of t
 
 Every secret this installer creates lives under one root, `--secret-root` (`/secret` by
 default): the validator keys, the keystore, the network identity, the node's environment
-file, the saved database credentials and the WireGuard keypair. One root so the whole set
+file, the saved database credentials, the `.pgpass` `cardano-db-sync` authenticates with,
+and the WireGuard keypair. One root so the whole set
 can be backed up, audited and restored as a unit rather than hunted for across the data
 root. What is *not* secret — the chain database, `res/`, the registration file — stays on
 the data root.
@@ -168,8 +169,10 @@ $ echo '/data/secret /secret none bind 0 0' | sudo tee -a /etc/fstab
 $ sudo mount /secret
 ```
 
-Two of those paths are ones `midnight-node` would otherwise derive from `--base-path`, so
-the unit has to name them: `--node-key-file` and `--keystore-path`. Writing them into the
+Three of those are ones a program would otherwise find by convention, so the units have to
+name them: `--node-key-file` and `--keystore-path` for `midnight-node`, which otherwise
+derives both from `--base-path`, and `PGPASSFILE` for `cardano-db-sync`, because libpq
+reads `~/.pgpass` and nothing else unless it is told otherwise. Writing them into the
 unit is not the same as the node being started with them — a systemd drop-in cannot amend
 `ExecStart`, only reset it and restate the whole command, so a drop-in written before those
 flags existed silently wins without them, and the node falls back to `--base-path` and
