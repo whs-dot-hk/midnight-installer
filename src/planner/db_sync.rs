@@ -12,7 +12,8 @@ use crate::action::{Action, StatefulAction};
 use crate::credentials::DatabaseCredentials;
 use crate::planner::{
     cardano::{base_packages, installed_version_matches, start_or_restart, unit_differs},
-    diff_from_default, platform_check, require_root, require_user, units, Planner,
+    diff_from_default, platform_check, require_root, require_secret_root, require_user, units,
+    Planner,
 };
 use crate::settings::{
     CommonSettings, Secret, CARDANO_DB_SYNC_SERVICE, CARDANO_NODE_SERVICE, DEFAULT_DB_NAME,
@@ -185,6 +186,7 @@ impl Planner for DbSync {
 
     async fn pre_install_check(&self) -> anyhow::Result<()> {
         require_root()?;
+        require_secret_root(&self.common.secret_root)?;
         require_user(&self.common.cardano_user)
     }
 }

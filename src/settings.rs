@@ -13,6 +13,21 @@ use url::Url;
 pub const STATE_DIR_NAME: &str = ".midnight-installer";
 
 pub const DEFAULT_DATA_ROOT: &str = "/data";
+/** Where every secret this installer creates is kept
+
+A single root so the whole set can be backed up, audited and restored as a unit instead of
+being hunted for across the data root. It is expected to be its own mount, backed by the
+same stateful disk as the data root:
+
+```text
+install -d -m 0755 /data/secret /secret
+echo '/data/secret /secret none bind 0 0' >> /etc/fstab
+mount /secret
+```
+
+A plain directory works, but is then only as durable as whatever carries `/`.
+*/
+pub const DEFAULT_SECRET_ROOT: &str = "/secret";
 pub const DEFAULT_CARDANO_NETWORK: &str = "preprod";
 pub const DEFAULT_CARDANO_MAGIC: u32 = 1;
 pub const DEFAULT_CARDANO_NODE_VERSION: &str = "10.6.2";
@@ -71,6 +86,15 @@ pub struct CommonSettings {
         global = true
     )]
     pub data_root: PathBuf,
+
+    /// The root every secret is kept under, expected to exist already
+    #[clap(
+        long,
+        default_value = DEFAULT_SECRET_ROOT,
+        env = "MIDNIGHT_INSTALLER_SECRET_ROOT",
+        global = true
+    )]
+    pub secret_root: PathBuf,
 
     /// The Linux user which owns and runs the Cardano services
     #[clap(
@@ -202,6 +226,7 @@ impl Default for CommonSettings {
     fn default() -> Self {
         Self {
             data_root: PathBuf::from(DEFAULT_DATA_ROOT),
+            secret_root: PathBuf::from(DEFAULT_SECRET_ROOT),
             cardano_user: default_service_user(),
             midnight_user: default_service_user(),
             cardano_network: DEFAULT_CARDANO_NETWORK.into(),
@@ -224,7 +249,7 @@ impl Default for CommonSettings {
 
 impl CommonSettings {
     pub fn paths(&self) -> Paths {
-        Paths::new(&self.data_root, &self.cardano_network)
+        Paths::new(&self.data_root, &self.secret_root, &self.cardano_network)
     }
 
     pub fn cardano_node_archive(&self) -> anyhow::Result<ReleaseArchive> {
@@ -312,6 +337,7 @@ impl CommonSettings {
     pub fn settings(&self) -> anyhow::Result<HashMap<String, serde_json::Value>> {
         let Self {
             data_root,
+            secret_root,
             cardano_user,
             midnight_user,
             cardano_network,
@@ -334,6 +360,10 @@ impl CommonSettings {
         map.insert(
             "data_root".into(),
             serde_json::to_value(data_root.display().to_string())?,
+        );
+        map.insert(
+            "secret_root".into(),
+            serde_json::to_value(secret_root.display().to_string())?,
         );
         map.insert("cardano_user".into(), serde_json::to_value(cardano_user)?);
         map.insert("midnight_user".into(), serde_json::to_value(midnight_user)?);
@@ -507,6 +537,7 @@ impl MainChainParams {
 #[derive(Debug, Clone)]
 pub struct Paths {
     pub data_root: PathBuf,
+    pub secret_root: PathBuf,
     pub state_dir: PathBuf,
     pub scratch_dir: PathBuf,
     pub receipt_dir: PathBuf,
@@ -533,18 +564,19 @@ pub struct Paths {
 }
 
 impl Paths {
-    pub fn new(data_root: impl AsRef<Path>, cardano_network: &str) -> Self {
+    pub fn new(
+        data_root: impl AsRef<Path>,
+        secret_root: impl AsRef<Path>,
+        cardano_network: &str,
+    ) -> Self {
         let data_root = data_root.as_ref().to_path_buf();
+        let secret_root = secret_root.as_ref().to_path_buf();
         let state_dir = data_root.join(STATE_DIR_NAME);
         let cardano_data = data_root.join("cardano");
         let postgres_data = data_root.join("postgresql");
         let midnight_data = data_root.join("midnight");
         let midnight_node_data = data_root.join("midnight_node");
         let midnight_runtime_data = midnight_node_data.join("data");
-        let chain_dir = midnight_runtime_data
-            .join("chains")
-            .join(format!("midnight_{cardano_network}"));
-
         Self {
             scratch_dir: state_dir.join("scratch"),
             receipt_dir: state_dir.join("receipts"),
@@ -554,18 +586,21 @@ impl Paths {
             cardano_db_sync_state: cardano_data.join("db-sync-state"),
             cardano_db_sync_config: cardano_data.join("db-sync-config.json"),
             mithril_tools: cardano_data.join("mithril-tools"),
-            postgres_credentials_file: postgres_data.join("fno-db-credentials.env"),
-            midnight_keys_dir: midnight_node_data.join("keys"),
+            postgres_credentials_file: secret_root.join("fno-db-credentials.env"),
+            midnight_keys_dir: secret_root.join("keys"),
             midnight_res_dir: midnight_node_data.join("res"),
             midnight_registration_file: midnight_node_data.join("partner-chains-public-keys.json"),
-            midnight_network_dir: chain_dir.join("network"),
-            midnight_keystore_dir: chain_dir.join("keystore"),
-            midnight_env_file: midnight_node_data.join(".env"),
+            // Both of these are what the node derives from `--base-path` by default; pulling
+            // them under the secret root is why the unit has to name them explicitly. See
+            // `planner::units::midnight_node`.
+            midnight_network_dir: secret_root.join("node"),
+            midnight_keystore_dir: secret_root.join("keystore"),
+            midnight_env_file: secret_root.join(".env"),
             midnight_chain_spec: midnight_node_data
                 .join("res")
                 .join(cardano_network)
                 .join("chain-spec-raw.json"),
-            wireguard_data: data_root.join("wireguard"),
+            wireguard_data: secret_root.join("wireguard"),
             cardano_data,
             postgres_data,
             midnight_data,
@@ -573,6 +608,7 @@ impl Paths {
             midnight_runtime_data,
             state_dir,
             data_root,
+            secret_root,
         }
     }
 
@@ -583,6 +619,15 @@ impl Paths {
             self.midnight_data.clone(),
             self.midnight_node_data.clone(),
             self.postgres_data.clone(),
+        ]
+    }
+
+    /// The directories which hold secrets, all under [`Self::secret_root`]
+    pub fn secret_directories(&self) -> Vec<PathBuf> {
+        vec![
+            self.midnight_keys_dir.clone(),
+            self.midnight_network_dir.clone(),
+            self.midnight_keystore_dir.clone(),
             self.wireguard_data.clone(),
         ]
     }
@@ -649,6 +694,43 @@ mod test {
     use super::*;
 
     const SHA256: &str = "f3d8816cd82adbcfa1b49a753e7e53b7131b3f0ce3eb70ee68c52e5df3f84e29";
+
+    #[test]
+    fn keeps_every_secret_under_the_secret_root() {
+        let paths = Paths::new("/data", "/secret", "preprod");
+
+        for secret in [
+            &paths.midnight_keys_dir,
+            &paths.midnight_network_dir,
+            &paths.midnight_keystore_dir,
+            &paths.midnight_env_file,
+            &paths.postgres_credentials_file,
+            &paths.wireguard_data,
+        ] {
+            assert!(
+                secret.starts_with("/secret"),
+                "`{}` is a secret and belongs under the secret root",
+                secret.display()
+            );
+        }
+
+        // The chain database is not a secret, and stays on the data root
+        assert!(paths.midnight_runtime_data.starts_with("/data"));
+        assert!(paths.midnight_registration_file.starts_with("/data"));
+    }
+
+    #[test]
+    fn the_secret_root_moves_with_the_setting() {
+        let paths = Paths::new("/data", "/mnt/keys", "preprod");
+        assert_eq!(
+            paths.midnight_keystore_dir,
+            PathBuf::from("/mnt/keys/keystore")
+        );
+        assert_eq!(
+            paths.midnight_network_dir.join("secret_ed25519"),
+            PathBuf::from("/mnt/keys/node/secret_ed25519")
+        );
+    }
 
     #[test]
     fn refuses_a_staged_archive_which_is_not_there() {

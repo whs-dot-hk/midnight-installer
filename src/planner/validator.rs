@@ -3,12 +3,13 @@ use std::collections::HashMap;
 use std::path::PathBuf;
 
 use crate::action::base::{CreateSystemdUnit, RequirePaths, StartSystemdUnit};
-use crate::action::midnight::{CreateValidatorEnvFile, PrepareSeedFiles};
+use crate::action::midnight::{CreateValidatorEnvFile, PrepareSeedFiles, VerifySecretFlags};
 use crate::action::postgres::CheckDatabaseCredentials;
 use crate::action::{Action, StatefulAction};
 use crate::credentials::DatabaseCredentials;
 use crate::planner::{
-    diff_from_default, platform_check, require_root, require_user, units, Planner,
+    diff_from_default, platform_check, require_root, require_secret_root, require_user, units,
+    Planner,
 };
 use crate::settings::{
     CommonSettings, MainChainParams, Secret, DEFAULT_DB_NAME, DEFAULT_DB_USER,
@@ -182,6 +183,18 @@ impl Planner for Validator {
             StartSystemdUnit::plan_restart(MIDNIGHT_NODE_SERVICE)
                 .await?
                 .boxed(),
+            // Writing the flags into the unit is not the same as the node being started with
+            // them: a drop-in which resets `ExecStart` restates the whole command from an
+            // older copy, and silently drops them. Ask the process itself.
+            VerifySecretFlags::plan(
+                MIDNIGHT_NODE_SERVICE,
+                paths.midnight_network_dir.join("secret_ed25519"),
+                &paths.midnight_keystore_dir,
+                &paths.midnight_runtime_data,
+                &self.common.secret_root,
+            )
+            .await?
+            .boxed(),
         ])
     }
 
@@ -217,6 +230,7 @@ impl Planner for Validator {
 
     async fn pre_install_check(&self) -> anyhow::Result<()> {
         require_root()?;
+        require_secret_root(&self.common.secret_root)?;
         require_user(&self.common.midnight_user)
     }
 }

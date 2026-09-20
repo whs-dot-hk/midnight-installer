@@ -8,7 +8,8 @@ use crate::action::midnight::{
 };
 use crate::action::{Action, StatefulAction};
 use crate::planner::{
-    cardano::base_packages, diff_from_default, platform_check, require_root, require_user, Planner,
+    cardano::base_packages, diff_from_default, platform_check, require_root, require_secret_root,
+    require_user, Planner,
 };
 use crate::settings::CommonSettings;
 
@@ -148,6 +149,7 @@ impl Planner for Midnight {
 
     async fn pre_install_check(&self) -> anyhow::Result<()> {
         require_root()?;
+        require_secret_root(&self.common.secret_root)?;
         require_user(&self.common.midnight_user)
     }
 }

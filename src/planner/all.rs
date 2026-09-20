@@ -17,8 +17,8 @@ use std::path::PathBuf;
 use crate::action::{Action, StatefulAction};
 use crate::planner::{
     cardano::Cardano, db_sync::DbSync, diff_from_default, directories::Directories,
-    midnight::Midnight, platform_check, require_root, require_user, validator::Validator,
-    wireguard::Wireguard, Planner,
+    midnight::Midnight, platform_check, require_root, require_secret_root, require_user,
+    validator::Validator, wireguard::Wireguard, Planner,
 };
 use crate::settings::CommonSettings;
 
@@ -168,6 +168,7 @@ impl Planner for All {
 
     async fn pre_install_check(&self) -> anyhow::Result<()> {
         require_root()?;
+        require_secret_root(&self.common().secret_root)?;
         require_user(&self.common().cardano_user)?;
         require_user(&self.common().midnight_user)
     }

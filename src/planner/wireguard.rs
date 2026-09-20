@@ -4,7 +4,9 @@ use std::path::PathBuf;
 use crate::action::base::CreateDirectory;
 use crate::action::wireguard::{GenerateWireguardKeys, InstallWireguardTools};
 use crate::action::{Action, StatefulAction};
-use crate::planner::{diff_from_default, platform_check, require_root, Planner};
+use crate::planner::{
+    diff_from_default, platform_check, require_root, require_secret_root, Planner,
+};
 use crate::settings::CommonSettings;
 
 /** The WireGuard tooling and this host's tunnel identity
@@ -60,6 +62,7 @@ impl Planner for Wireguard {
     }
 
     async fn pre_install_check(&self) -> anyhow::Result<()> {
-        require_root()
+        require_root()?;
+        require_secret_root(&self.common.secret_root)
     }
 }

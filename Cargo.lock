@@ -631,7 +631,7 @@ dependencies = [
 [[package]]
 name = "installer"
 version = "0.1.0"
-source = "git+https://github.com/swimming-bookstore/installer#30d9a11701c9f21533eefcb8351cdc369c64c7c6"
+source = "git+https://github.com/swimming-bookstore/installer#dd17ebd5737bc603ba15a406e7a0c0a87ee493a2"
 dependencies = [
  "anyhow",
  "async-trait",

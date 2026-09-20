@@ -40,20 +40,20 @@ because the same plan produced the piece a few actions earlier.
 Installing does not wait for the host to catch up, because nothing needs it to: db-sync
 follows a relay which is still syncing, and the node follows a db-sync which is still
 filling, each retrying until the one below it has what it wants. So `pre_install_check` only
-asks what must be true before anything runs — root, and the service users — and how far along
-the host actually is belongs to `status`.
+asks what must be true before anything runs — root, the service users, and the secret root —
+and how far along the host actually is belongs to `status`.
 
 ## Stages
 
 | Stage | What it does |
 | --- | --- |
 | `all` | Every stage below, in order, as one plan |
-| `directories` | The `/data` layout everything else writes into |
+| `directories` | The `/data` and `/secret` layout everything else writes into |
 | `cardano` | `cardano-node` + `cardano-cli`, the Mithril client, a snapshot download, and `cardano-node.service` |
 | `db-sync` | PostgreSQL from PGDG, the cluster moved onto the data disk and tuned, the role and database, `cardano-db-sync` and its service |
 | `midnight` | The `midnight-node` binary, the AURA / GRANDPA / cross-chain keys, the network identity, the keystore, and the registration file |
 | `wireguard` | `wireguard-tools` at the pinned tag, and this host's tunnel keypair |
-| `validator` | The seed files, the node's environment, `midnight-node.service`, and starting it |
+| `validator` | The seed files, the node's environment, `midnight-node.service`, starting it, and checking it really started with its secret-root flags |
 
 ## Using it
 
@@ -150,6 +150,38 @@ Actions which own irreplaceable state say so in their revert description and lea
 Read the uninstall plan (`--explain`) before confirming; it names every one of these.
 
 ## Secrets
+
+Every secret this installer creates lives under one root, `--secret-root` (`/secret` by
+default): the validator keys, the keystore, the network identity, the node's environment
+file, the saved database credentials and the WireGuard keypair. One root so the whole set
+can be backed up, audited and restored as a unit rather than hunted for across the data
+root. What is *not* secret — the chain database, `res/`, the registration file — stays on
+the data root.
+
+The installer will not create that root. It is meant to be a mount backed by the same
+stateful disk as the data root, and creating it would quietly put a validator's keys on
+whatever carries `/`, which is the disk a rebuilt host throws away:
+
+```console
+$ sudo install -d -m 0755 /data/secret /secret
+$ echo '/data/secret /secret none bind 0 0' | sudo tee -a /etc/fstab
+$ sudo mount /secret
+```
+
+Two of those paths are ones `midnight-node` would otherwise derive from `--base-path`, so
+the unit has to name them: `--node-key-file` and `--keystore-path`. Writing them into the
+unit is not the same as the node being started with them — a systemd drop-in cannot amend
+`ExecStart`, only reset it and restate the whole command, so a drop-in written before those
+flags existed silently wins without them, and the node falls back to `--base-path` and
+re-creates a keystore of real private keys outside the root. `systemctl cat` shows both
+lines and looks fine. The `validator` stage therefore reads `/proc/<pid>/cmdline` after
+starting the node and **fails** if either flag is missing, rather than reporting success
+over a node writing keys to the wrong place.
+
+A host installed before the secret root existed is **not** migrated by this installer. Its
+secrets are still in their old places, so the stages which look for them under the root
+would find none and generate a fresh identity — which would strand the registration already
+sent for that node. Move them into the root by hand first, then run the stages.
 
 The receipt sits next to the installed system, so nothing secret goes into it: `Secret`
 serializes as `"<redacted>"` and its `Debug` output is redacted too. Nothing in a revert

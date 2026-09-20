@@ -124,6 +124,8 @@ EnvironmentFile={env_file}
 ExecStart={bin_dir}/midnight-node \\
     --chain {chain_spec} \\
     --base-path {base_path} \\
+    --node-key-file {node_key_file} \\
+    --keystore-path {keystore_path} \\
     --telemetry-url '{telemetry_url}' \\
     --validator \\
     --pool-limit 35 \\
@@ -142,6 +144,41 @@ WantedBy=multi-user.target
         bin_dir = bin_dir.display(),
         chain_spec = paths.midnight_chain_spec.display(),
         base_path = paths.midnight_runtime_data.display(),
+        // The node derives both of these from `--base-path` unless it is told otherwise.
+        // They live under the secret root, so they have to be named: without them the node
+        // silently falls back and writes a keystore of real private keys under the base
+        // path. `Validator` checks after starting that they really did reach the process.
+        node_key_file = paths.midnight_network_dir.join("secret_ed25519").display(),
+        keystore_path = paths.midnight_keystore_dir.display(),
         telemetry_url = TELEMETRY_URL,
     ))
+}
+
+#[cfg(test)]
+mod test {
+    use super::*;
+
+    /** The two flags which stop the node falling back to `--base-path`
+
+    Without them `midnight-node` derives its keystore and network key from `--base-path` and
+    writes private keys there, outside the secret root. They have been dropped once already,
+    by a systemd drop-in holding a stale copy of `ExecStart`, and a host ran that way for
+    three days. `VerifySecretFlags` catches the drop-in; this catches the unit.
+    */
+    #[test]
+    fn the_validator_unit_names_the_secret_root_paths() {
+        let settings = CommonSettings {
+            midnight_user: String::from("root"),
+            secret_root: std::path::PathBuf::from("/secret"),
+            ..CommonSettings::default()
+        };
+
+        let unit = midnight_node(&settings).unwrap();
+
+        assert!(
+            unit.contains("--node-key-file /secret/node/secret_ed25519"),
+            "{unit}"
+        );
+        assert!(unit.contains("--keystore-path /secret/keystore"), "{unit}");
+    }
 }
