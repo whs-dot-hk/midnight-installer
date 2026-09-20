@@ -214,7 +214,7 @@ mod test {
 
     fn example() -> CreateValidatorEnvFile {
         CreateValidatorEnvFile {
-            path: PathBuf::from("/data/midnight_node/.env"),
+            path: PathBuf::from("/secret/.env"),
             user: String::from("ubuntu"),
             node_name: String::from("fno-1"),
             network: String::from("preprod"),
@@ -224,10 +224,10 @@ mod test {
                 Secret::new("p@ss word"),
             ),
             main_chain: MainChainParams::preprod(),
-            node_key_file: PathBuf::from("/data/midnight_node/data/network/secret_ed25519"),
-            aura_seed_file: PathBuf::from("/data/midnight_node/keys/aura.seed"),
-            grandpa_seed_file: PathBuf::from("/data/midnight_node/keys/grandpa.seed"),
-            cross_chain_seed_file: PathBuf::from("/data/midnight_node/keys/cross_chain.seed"),
+            node_key_file: PathBuf::from("/secret/node/secret_ed25519"),
+            aura_seed_file: PathBuf::from("/secret/keys/aura.seed"),
+            grandpa_seed_file: PathBuf::from("/secret/keys/grandpa.seed"),
+            cross_chain_seed_file: PathBuf::from("/secret/keys/cross_chain.seed"),
             prometheus_push_endpoint: String::from("https://example.invalid/receive"),
             sidechain_block_beneficiary: String::from("00"),
         }

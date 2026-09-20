@@ -12,6 +12,7 @@ pub(crate) mod generate_keys;
 pub(crate) mod install_midnight_node;
 pub(crate) mod migrate_legacy_layout;
 pub(crate) mod prepare_seed_files;
+pub(crate) mod verify_secret_flags;
 
 use anyhow::Context;
 use std::path::{Path, PathBuf};
@@ -25,6 +26,7 @@ pub use generate_keys::{GenerateNetworkKey, GenerateValidatorKey, KeyScheme};
 pub use install_midnight_node::InstallMidnightNode;
 pub use migrate_legacy_layout::MigrateLegacyLayout;
 pub use prepare_seed_files::PrepareSeedFiles;
+pub use verify_secret_flags::VerifySecretFlags;
 
 /** How to run `midnight-node` for its `key` subcommands
 

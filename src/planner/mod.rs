@@ -53,6 +53,25 @@ pub(crate) fn require_root() -> anyhow::Result<()> {
     Ok(())
 }
 
+/** The secret root has to exist, and this installer will not create it
+
+It is meant to be a mount backed by the stateful disk, not a directory: creating it here
+would silently put the validator's keys on whatever carries `/`, which is the disk that
+gets thrown away when a host is rebuilt. Better to stop and have someone mount it.
+*/
+pub(crate) fn require_secret_root(secret_root: &std::path::Path) -> anyhow::Result<()> {
+    if !secret_root.is_dir() {
+        anyhow::bail!(
+            "No secret root at `{}`, create it first:\n  \
+             install -d -m 0755 /data/secret {0}\n  \
+             echo '/data/secret {0} none bind 0 0' >> /etc/fstab\n  \
+             mount {0}",
+            secret_root.display()
+        );
+    }
+    Ok(())
+}
+
 /// The service user has to exist before anything can be owned by it
 pub(crate) fn require_user(user: &str) -> anyhow::Result<()> {
     if !crate::settings::user_exists(user) {

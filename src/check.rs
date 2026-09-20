@@ -173,6 +173,28 @@ pub async fn db_sync_block(credentials: &DatabaseCredentials) -> anyhow::Result<
         .with_context(|| format!("`cardano-db-sync` returned `{value}` as its latest block"))
 }
 
+/** The PID of a unit's main process, or an error if it has none
+
+`systemctl show -p MainPID` answers `0` for a unit which is not running, which is not a PID
+and not something to paper over: the caller wants to inspect a process that exists.
+*/
+pub async fn unit_main_pid(unit: &str) -> anyhow::Result<u32> {
+    let mut command = crate::command("systemctl");
+    command.args(["show", unit, "-p", "MainPID", "--value"]);
+
+    let output = crate::execute_command(&mut command)
+        .await
+        .with_context(|| format!("Asking systemd for the main PID of `{unit}`"))?;
+    let value = String::from_utf8_lossy(&output.stdout).trim().to_string();
+
+    match value.parse::<u32>() {
+        Ok(0) | Err(_) => {
+            anyhow::bail!("`{unit}` has no running main process (systemd reported `{value}`)")
+        },
+        Ok(pid) => Ok(pid),
+    }
+}
+
 pub fn is_root() -> bool {
     nix::unistd::Uid::effective().is_root()
 }
