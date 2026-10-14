@@ -10,6 +10,8 @@ use crate::settings::CommonSettings;
 
 /** The `/data` and `/secret` layout every later stage writes into
 
+See [`crate::settings::Paths`] for how it follows the FNO guides.
+
 Each directory is created exactly as the stage which fills it would create it — the same
 owner, the same mode — so that stage finds it already in place rather than owned by someone
 else, and so the whole-host plan can tell the two are the same action.
@@ -40,16 +42,21 @@ impl Planner for Directories {
 
         for (directory, owner, mode) in [
             (&paths.cardano_data, Some(cardano), 0o755),
-            (&paths.midnight_data, Some(midnight), 0o755),
-            (&paths.midnight_node_data, Some(midnight), 0o755),
+            (&paths.midnight_runtime_data, Some(midnight), 0o700),
             (&paths.postgres_data, None, 0o755),
             // Under the secret root. 0o700 throughout: nothing below it is readable by
-            // anyone but the user which runs the node, or by root for the WireGuard key
-            (&paths.midnight_keys_dir, Some(midnight), 0o700),
-            (&paths.midnight_network_dir, Some(midnight), 0o700),
-            (&paths.midnight_keystore_dir, Some(midnight), 0o700),
+            // anyone but the user which runs the node, or by root for the WireGuard key.
+            // The key JSONs sit in the secret root itself, which is root's, so they get no
+            // directory of their own.
             (&paths.wireguard_data, None, 0o700),
-        ] {
+        ]
+        .into_iter()
+        .chain(
+            paths
+                .midnight_secret_directories()
+                .iter()
+                .map(|directory| (directory, Some(midnight), 0o700)),
+        ) {
             actions.push(
                 CreateDirectory::plan(directory, owner.cloned(), owner.cloned(), Some(mode), false)
                     .await?

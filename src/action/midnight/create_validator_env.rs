@@ -24,9 +24,10 @@ pub struct CreateValidatorEnvFile {
     credentials: DatabaseCredentials,
     main_chain: MainChainParams,
     node_key_file: PathBuf,
-    aura_seed_file: PathBuf,
-    grandpa_seed_file: PathBuf,
-    cross_chain_seed_file: PathBuf,
+    /// The seed files are named after the public keys, which a whole-host plan has not
+    /// generated yet when it is made, so they are found here when the file is written
+    keys_dir: PathBuf,
+    seed_dir: PathBuf,
     prometheus_push_endpoint: String,
     sidechain_block_beneficiary: String,
 }
@@ -50,15 +51,14 @@ impl CreateValidatorEnvFile {
             credentials: credentials.clone(),
             main_chain,
             node_key_file: paths.midnight_network_dir.join("secret_ed25519"),
-            aura_seed_file: paths.midnight_keys_dir.join("aura.seed"),
-            grandpa_seed_file: paths.midnight_keys_dir.join("grandpa.seed"),
-            cross_chain_seed_file: paths.midnight_keys_dir.join("cross_chain.seed"),
+            keys_dir: paths.midnight_keys_dir,
+            seed_dir: paths.midnight_seed_dir,
             prometheus_push_endpoint: crate::settings::PROMETHEUS_PUSH_ENDPOINT.to_string(),
             sidechain_block_beneficiary: sidechain_block_beneficiary.into(),
         }))
     }
 
-    fn render(&self) -> String {
+    fn render(&self, seed_files: &[(&str, PathBuf)]) -> String {
         let Self {
             user: _,
             path: _,
@@ -67,9 +67,8 @@ impl CreateValidatorEnvFile {
             credentials,
             main_chain,
             node_key_file,
-            aura_seed_file,
-            grandpa_seed_file,
-            cross_chain_seed_file,
+            keys_dir: _,
+            seed_dir: _,
             prometheus_push_endpoint,
             sidechain_block_beneficiary,
         } = self;
@@ -99,18 +98,9 @@ impl CreateValidatorEnvFile {
             "NODE_KEY_FILE",
             systemd_env_quote(&node_key_file.display().to_string()),
         );
-        push(
-            "AURA_SEED_FILE",
-            systemd_env_quote(&aura_seed_file.display().to_string()),
-        );
-        push(
-            "GRANDPA_SEED_FILE",
-            systemd_env_quote(&grandpa_seed_file.display().to_string()),
-        );
-        push(
-            "CROSS_CHAIN_SEED_FILE",
-            systemd_env_quote(&cross_chain_seed_file.display().to_string()),
-        );
+        for (variable, path) in seed_files {
+            push(variable, systemd_env_quote(&path.display().to_string()));
+        }
         push(
             "SIDECHAIN_BLOCK_BENEFICIARY",
             systemd_env_quote(sidechain_block_beneficiary),
@@ -187,7 +177,19 @@ impl Action for CreateValidatorEnvFile {
 
     #[tracing::instrument(level = "debug", skip_all)]
     async fn execute(&mut self) -> anyhow::Result<()> {
-        crate::util::write_owned_file(&self.path, &self.render(), 0o600, Some(&self.user)).await?;
+        let seed_files: Vec<(&str, PathBuf)> =
+            crate::action::midnight::seed_files(&self.keys_dir, &self.seed_dir)
+                .await?
+                .into_iter()
+                .map(|seed| (seed.variable, seed.path))
+                .collect();
+        crate::util::write_owned_file(
+            &self.path,
+            &self.render(&seed_files),
+            0o600,
+            Some(&self.user),
+        )
+        .await?;
         Ok(())
     }
 
@@ -224,25 +226,51 @@ mod test {
                 Secret::new("p@ss word"),
             ),
             main_chain: MainChainParams::preprod(),
-            node_key_file: PathBuf::from("/secret/node/secret_ed25519"),
-            aura_seed_file: PathBuf::from("/secret/keys/aura.seed"),
-            grandpa_seed_file: PathBuf::from("/secret/keys/grandpa.seed"),
-            cross_chain_seed_file: PathBuf::from("/secret/keys/cross_chain.seed"),
+            node_key_file: PathBuf::from(
+                "/secret/data/chains/midnight_preprod/network/secret_ed25519",
+            ),
+            keys_dir: PathBuf::from("/secret"),
+            seed_dir: PathBuf::from("/secret/keystore"),
             prometheus_push_endpoint: String::from("https://example.invalid/receive"),
             sidechain_block_beneficiary: String::from("00"),
         }
     }
 
+    fn seeds() -> Vec<(&'static str, PathBuf)> {
+        vec![
+            (
+                "AURA_SEED_FILE",
+                PathBuf::from("/secret/keystore/61757261d435"),
+            ),
+            (
+                "GRANDPA_SEED_FILE",
+                PathBuf::from("/secret/keystore/6772616e88dc"),
+            ),
+            (
+                "CROSS_CHAIN_SEED_FILE",
+                PathBuf::from("/secret/keystore/63726368020a"),
+            ),
+        ]
+    }
+
+    #[test]
+    fn points_each_seed_variable_at_its_file() {
+        let rendered = example().render(&seeds());
+        assert!(rendered.contains("AURA_SEED_FILE=\"/secret/keystore/61757261d435\"\n"));
+        assert!(rendered.contains("GRANDPA_SEED_FILE=\"/secret/keystore/6772616e88dc\"\n"));
+        assert!(rendered.contains("CROSS_CHAIN_SEED_FILE=\"/secret/keystore/63726368020a\"\n"));
+    }
+
     #[test]
     fn quotes_values_for_systemd() {
-        let rendered = example().render();
+        let rendered = example().render(&seeds());
         assert!(rendered.contains("POSTGRES_PASSWORD=\"p@ss word\"\n"));
         assert!(rendered.contains("NODE_NAME=\"fno-1\"\n"));
     }
 
     #[test]
     fn percent_encodes_the_connection_string() {
-        let rendered = example().render();
+        let rendered = example().render(&seeds());
         assert!(rendered.contains(
             "DB_SYNC_POSTGRES_CONNECTION_STRING=\"postgresql://midnight:p%40ss%20word@localhost:5432/cexplorer\"\n"
         ));
@@ -250,7 +278,7 @@ mod test {
 
     #[test]
     fn carries_the_main_chain_geometry() {
-        let rendered = example().render();
+        let rendered = example().render(&seeds());
         assert!(rendered.contains("MC__EPOCH_DURATION_MILLIS=432000000\n"));
         assert!(rendered.contains("CARDANO_SECURITY_PARAMETER=2160\n"));
     }

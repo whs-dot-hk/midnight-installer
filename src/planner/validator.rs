@@ -163,9 +163,13 @@ impl Planner for Validator {
             // Likewise: a wrong password would not fail here, it would fail in the node's
             // journal every ten seconds for ever while this stage reported success
             CheckDatabaseCredentials::plan(&credentials).await?.boxed(),
-            PrepareSeedFiles::plan(&paths.midnight_keys_dir, &self.common.midnight_user)
-                .await?
-                .boxed(),
+            PrepareSeedFiles::plan(
+                &paths.midnight_keys_dir,
+                &paths.midnight_seed_dir,
+                &self.common.midnight_user,
+            )
+            .await?
+            .boxed(),
             CreateValidatorEnvFile::plan(
                 &self.common,
                 node_name,

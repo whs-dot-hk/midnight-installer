@@ -32,6 +32,23 @@ impl std::fmt::Display for KeyScheme {
     }
 }
 
+/** Whether a key has appeared at `path` since the plan was made, and must be kept
+
+The plan only knows what was there when it was made. A key which arrived afterwards, moved
+in by a migration or written by another run, is an identity this host may already have
+registered, so finding one here is not an error: it is kept, and nothing is generated.
+*/
+async fn refuse_to_overwrite(path: &std::path::Path) -> bool {
+    if file_has_contents(path).await {
+        tracing::warn!(
+            "A key appeared at `{}` after planning, keeping it rather than generating another",
+            path.display()
+        );
+        return true;
+    }
+    false
+}
+
 /** Generate one validator key, as JSON holding its public key and secret phrase
 
 An existing key is never regenerated and never deleted on revert: a validator's identity is
@@ -113,6 +130,10 @@ impl Action for GenerateValidatorKey {
         let Self {
             scheme, path, node, ..
         } = self;
+
+        if refuse_to_overwrite(path).await {
+            return Ok(());
+        }
 
         // The key comes back on stdout, so it is written here with its mode already set
         // rather than by the node under whatever umask is in force. The runner which never
@@ -226,6 +247,10 @@ impl Action for GenerateNetworkKey {
     #[tracing::instrument(level = "debug", skip_all)]
     async fn execute(&mut self) -> anyhow::Result<()> {
         let Self { path, node } = self;
+
+        if refuse_to_overwrite(path).await {
+            return Ok(());
+        }
 
         if let Some(parent) = path.parent() {
             tokio::fs::create_dir_all(parent)

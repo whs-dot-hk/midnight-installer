@@ -3,26 +3,23 @@ use std::path::PathBuf;
 
 use tracing::{span, Span};
 
-use crate::action::midnight::read_key_field;
+use crate::action::midnight::{seed_files, SEED_FILES};
 use crate::action::{Action, ActionDescription, StatefulAction};
-
-/// The generated key files, and the seed file the node's environment points at
-const SEEDS: &[(&str, &str)] = &[
-    ("aura.json", "aura.seed"),
-    ("grandpa.json", "grandpa.seed"),
-    ("cross_chain.json", "cross_chain.seed"),
-];
 
 /** Write the bare secret phrases the node reads at start up
 
 The node takes each seed as a file path in its environment, while the generated keys are
 JSON. These files are derived from those, so unlike the keys themselves they can be deleted
 and rebuilt, and revert does delete them.
+
+They are not the keystore's own entries, although they are named like them: the node trims
+a seed file but does not unquote it, and the keystore stores each phrase as a JSON string.
 */
 #[derive(Debug, serde::Deserialize, serde::Serialize, Clone)]
 #[serde(tag = "action_name", rename = "prepare_seed_files")]
 pub struct PrepareSeedFiles {
     keys_dir: PathBuf,
+    seed_dir: PathBuf,
     user: String,
 }
 
@@ -30,10 +27,12 @@ impl PrepareSeedFiles {
     #[tracing::instrument(level = "debug", skip_all)]
     pub async fn plan(
         keys_dir: impl Into<PathBuf>,
+        seed_dir: impl Into<PathBuf>,
         user: impl Into<String>,
     ) -> anyhow::Result<StatefulAction<Self>> {
         Ok(StatefulAction::uncompleted(Self {
             keys_dir: keys_dir.into(),
+            seed_dir: seed_dir.into(),
             user: user.into(),
         }))
     }
@@ -45,7 +44,7 @@ impl Action for PrepareSeedFiles {
     fn tracing_synopsis(&self) -> String {
         format!(
             "Write the validator seed files into `{}`",
-            self.keys_dir.display()
+            self.seed_dir.display()
         )
     }
 
@@ -53,25 +52,31 @@ impl Action for PrepareSeedFiles {
         span!(
             tracing::Level::DEBUG,
             "prepare_seed_files",
-            keys_dir = tracing::field::display(self.keys_dir.display()),
+            seed_dir = tracing::field::display(self.seed_dir.display()),
         )
     }
 
     fn execute_description(&self) -> Vec<ActionDescription> {
         vec![ActionDescription::new(
             self.tracing_synopsis(),
-            SEEDS
+            SEED_FILES
                 .iter()
-                .map(|(source, seed)| format!("`{seed}`, from `{source}`"))
+                .map(|(variable, key_type, source)| {
+                    format!("`{variable}`: `{key_type}` + public key, from `{source}`")
+                })
                 .collect(),
         )]
     }
 
     #[tracing::instrument(level = "debug", skip_all)]
     async fn execute(&mut self) -> anyhow::Result<()> {
-        let Self { keys_dir, user } = self;
+        let Self {
+            keys_dir,
+            seed_dir,
+            user,
+        } = self;
 
-        for (source, seed) in SEEDS {
+        for (_, _, source) in SEED_FILES {
             let source_path = keys_dir.join(source);
             if !source_path.is_file() {
                 anyhow::bail!(
@@ -79,11 +84,26 @@ impl Action for PrepareSeedFiles {
                     source_path.display()
                 );
             }
+        }
 
-            let phrase = read_key_field(&source_path, "secretPhrase").await?;
+        tokio::fs::create_dir_all(&seed_dir)
+            .await
+            .with_context(|| format!("Creating directory `{}`", seed_dir.display()))?;
+        let uid = crate::util::uid_of(user)?;
+        let gid = crate::util::gid_of(user).ok();
+        nix::unistd::chown(seed_dir.as_path(), Some(uid), gid)
+            .with_context(|| format!("Changing the owner of `{}`", seed_dir.display()))?;
+        tokio::fs::set_permissions(
+            &seed_dir,
+            std::os::unix::fs::PermissionsExt::from_mode(0o700),
+        )
+        .await
+        .with_context(|| format!("Setting mode `{:#o}` on `{}`", 0o700, seed_dir.display()))?;
+
+        for seed in seed_files(keys_dir, seed_dir).await? {
             crate::util::write_owned_file(
-                &keys_dir.join(seed),
-                &format!("{phrase}\n"),
+                &seed.path,
+                &format!("{}\n", seed.phrase),
                 0o600,
                 Some(user),
             )
@@ -104,11 +124,18 @@ impl Action for PrepareSeedFiles {
 
     #[tracing::instrument(level = "debug", skip_all)]
     async fn revert(&mut self) -> anyhow::Result<()> {
-        for (_, seed) in SEEDS {
-            let path = self.keys_dir.join(seed);
-            crate::util::remove_file_if_exists(&path)
+        // Named after the public keys, so without the keys there is nothing to find them by
+        let seeds = match seed_files(&self.keys_dir, &self.seed_dir).await {
+            Ok(seeds) => seeds,
+            Err(e) => {
+                tracing::warn!("Leaving the seed files in place: {e:#}");
+                return Ok(());
+            },
+        };
+        for seed in seeds {
+            crate::util::remove_file_if_exists(&seed.path)
                 .await
-                .with_context(|| format!("Removing `{}`", path.display()))?;
+                .with_context(|| format!("Removing `{}`", seed.path.display()))?;
         }
         Ok(())
     }
