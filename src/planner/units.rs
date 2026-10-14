@@ -139,7 +139,7 @@ LimitNOFILE=65535
 WantedBy=multi-user.target
 ",
         network = settings.cardano_network,
-        working_directory = paths.midnight_node_data.display(),
+        working_directory = paths.midnight_work_dir.display(),
         env_file = paths.midnight_env_file.display(),
         bin_dir = bin_dir.display(),
         chain_spec = paths.midnight_chain_spec.display(),
@@ -182,7 +182,7 @@ mod test {
 
         let unit = cardano_db_sync(&settings, &credentials).unwrap();
 
-        assert!(unit.contains("PGPASSFILE=/secret/pgpass"), "{unit}");
+        assert!(unit.contains("PGPASSFILE=/secret/.pgpass"), "{unit}");
     }
 
     #[test]
@@ -196,9 +196,14 @@ mod test {
         let unit = midnight_node(&settings).unwrap();
 
         assert!(
-            unit.contains("--node-key-file /secret/node/secret_ed25519"),
+            unit.contains(
+                "--node-key-file /secret/data/chains/midnight_preprod/network/secret_ed25519"
+            ),
             "{unit}"
         );
-        assert!(unit.contains("--keystore-path /secret/keystore"), "{unit}");
+        assert!(
+            unit.contains("--keystore-path /secret/data/chains/midnight_preprod/keystore"),
+            "{unit}"
+        );
     }
 }

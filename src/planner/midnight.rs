@@ -48,7 +48,7 @@ impl Planner for Midnight {
         let node = NodeInvocation {
             user: user.clone(),
             binary: crate::settings::user_bin_dir(&user)?.join("midnight-node"),
-            work_dir: paths.midnight_node_data.clone(),
+            work_dir: paths.midnight_work_dir.clone(),
             network: self.common.cardano_network.clone(),
         };
         let mut actions: Vec<StatefulAction<Box<dyn Action>>> = vec![];
@@ -57,14 +57,12 @@ impl Planner for Midnight {
             actions.push(base_packages().await?);
         }
 
-        for (directory, mode) in [
-            (&paths.midnight_data, 0o755),
-            (&paths.midnight_node_data, 0o755),
-            (&paths.midnight_runtime_data, 0o700),
-            (&paths.midnight_keys_dir, 0o700),
-        ] {
+        // The key JSONs go in the secret root itself, which stays root's
+        for directory in std::iter::once(&paths.midnight_runtime_data)
+            .chain(paths.midnight_secret_directories().iter())
+        {
             actions.push(
-                CreateDirectory::plan(directory, user.clone(), user.clone(), Some(mode), false)
+                CreateDirectory::plan(directory, user.clone(), user.clone(), Some(0o700), false)
                     .await?
                     .boxed(),
             );

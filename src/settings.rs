@@ -533,7 +533,40 @@ impl MainChainParams {
     }
 }
 
-/// Every path the FNO data layout is made of, derived from the data root
+/** The Midnight chain id for a Cardano network, as `midnight-node` names its directory under
+`<base path>/chains`: `midnight` on mainnet, `midnight_<network>` everywhere else
+*/
+pub fn midnight_chain_id(network: &str) -> String {
+    match network {
+        "mainnet" => String::from("midnight"),
+        _ => format!("midnight_{network}"),
+    }
+}
+
+/** Every path the FNO data layout is made of
+
+It is the layout of the FNO guides,
+which put everything in the service user's home, split across two roots: the data root
+stands in for that home for everything which can be rebuilt, the secret root for everything
+which cannot. Relative to its root, each file has the path and name the guides give it, so
+a command from the guides works here with `~` replaced by the right root.
+
+```text
+<data root>/cardano-data/{db,schema,db-sync-state,db-sync-config.json}   ~/cardano-data
+<data root>/data                       node base path                    ~/data
+<data root>/res                        chain configuration               ~/res
+<data root>/partner-chains-public-keys.json                              ~/partner-chains-public-keys.json
+<secret root>/{aura,grandpa,cross_chain}.json                            ~/aura.json ...
+<secret root>/data/chains/<chain>/network/secret_ed25519                 ~/data/chains/<chain>/network
+<secret root>/data/chains/<chain>/keystore                               ~/data/chains/<chain>/keystore
+<secret root>/keystore/<key type hex><public key hex>   the seed files   ~/keystore/...
+<secret root>/.env                                                       ~/.env
+<secret root>/.pgpass                                                    ~/.pgpass
+```
+
+The guides do not place the WireGuard keypair or the saved database credentials, so those
+keep their own names under the secret root.
+*/
 #[derive(Debug, Clone)]
 pub struct Paths {
     pub data_root: PathBuf,
@@ -551,14 +584,20 @@ pub struct Paths {
     pub postgres_data: PathBuf,
     pub postgres_credentials_file: PathBuf,
     pub postgres_pgpass_file: PathBuf,
-    pub midnight_data: PathBuf,
-    pub midnight_node_data: PathBuf,
+    /// Where the node is run from, and where `res/` is: the guides' home directory
+    pub midnight_work_dir: PathBuf,
+    /// The generated key JSONs; the secret root itself, as the guides keep them in `~`
     pub midnight_keys_dir: PathBuf,
     pub midnight_res_dir: PathBuf,
     pub midnight_registration_file: PathBuf,
+    /// The node's `--base-path`
     pub midnight_runtime_data: PathBuf,
+    /// `data/chains/<chain>` under the secret root, mirroring the node's own layout
+    pub midnight_secret_chain_dir: PathBuf,
     pub midnight_network_dir: PathBuf,
     pub midnight_keystore_dir: PathBuf,
+    /// The seed files `*_SEED_FILE` point at, named as keystore entries are
+    pub midnight_seed_dir: PathBuf,
     pub midnight_env_file: PathBuf,
     pub midnight_chain_spec: PathBuf,
     pub wireguard_data: PathBuf,
@@ -573,11 +612,16 @@ impl Paths {
         let data_root = data_root.as_ref().to_path_buf();
         let secret_root = secret_root.as_ref().to_path_buf();
         let state_dir = data_root.join(STATE_DIR_NAME);
-        let cardano_data = data_root.join("cardano");
+        let cardano_data = data_root.join("cardano-data");
         let postgres_data = data_root.join("postgresql");
-        let midnight_data = data_root.join("midnight");
-        let midnight_node_data = data_root.join("midnight_node");
-        let midnight_runtime_data = midnight_node_data.join("data");
+        let midnight_res_dir = data_root.join("res");
+        // Both of these are what the node derives from `--base-path` by default; keeping
+        // them under the secret root is why the unit has to name them explicitly. See
+        // `planner::units::midnight_node`.
+        let midnight_secret_chain_dir = secret_root
+            .join("data")
+            .join("chains")
+            .join(midnight_chain_id(cardano_network));
         Self {
             scratch_dir: state_dir.join("scratch"),
             receipt_dir: state_dir.join("receipts"),
@@ -590,26 +634,23 @@ impl Paths {
             postgres_credentials_file: secret_root.join("fno-db-credentials.env"),
             // libpq reads `~/.pgpass` and nothing else unless `PGPASSFILE` names a
             // path, which the `cardano-db-sync` unit does. See `planner::units`.
-            postgres_pgpass_file: secret_root.join("pgpass"),
-            midnight_keys_dir: secret_root.join("keys"),
-            midnight_res_dir: midnight_node_data.join("res"),
-            midnight_registration_file: midnight_node_data.join("partner-chains-public-keys.json"),
-            // Both of these are what the node derives from `--base-path` by default; pulling
-            // them under the secret root is why the unit has to name them explicitly. See
-            // `planner::units::midnight_node`.
-            midnight_network_dir: secret_root.join("node"),
-            midnight_keystore_dir: secret_root.join("keystore"),
+            postgres_pgpass_file: secret_root.join(".pgpass"),
+            midnight_work_dir: data_root.clone(),
+            midnight_keys_dir: secret_root.clone(),
+            midnight_registration_file: data_root.join("partner-chains-public-keys.json"),
+            midnight_runtime_data: data_root.join("data"),
+            midnight_network_dir: midnight_secret_chain_dir.join("network"),
+            midnight_keystore_dir: midnight_secret_chain_dir.join("keystore"),
+            midnight_seed_dir: secret_root.join("keystore"),
             midnight_env_file: secret_root.join(".env"),
-            midnight_chain_spec: midnight_node_data
-                .join("res")
+            midnight_chain_spec: midnight_res_dir
                 .join(cardano_network)
                 .join("chain-spec-raw.json"),
             wireguard_data: secret_root.join("wireguard"),
+            midnight_secret_chain_dir,
+            midnight_res_dir,
             cardano_data,
             postgres_data,
-            midnight_data,
-            midnight_node_data,
-            midnight_runtime_data,
             state_dir,
             data_root,
             secret_root,
@@ -620,19 +661,25 @@ impl Paths {
     pub fn base_directories(&self) -> Vec<PathBuf> {
         vec![
             self.cardano_data.clone(),
-            self.midnight_data.clone(),
-            self.midnight_node_data.clone(),
+            self.midnight_runtime_data.clone(),
             self.postgres_data.clone(),
         ]
     }
 
-    /// The directories which hold secrets, all under [`Self::secret_root`]
-    pub fn secret_directories(&self) -> Vec<PathBuf> {
+    /** The directories under the secret root the node's user owns, parents first
+
+    `data` and `data/chains` are only there to mirror the node's own layout, but they are
+    planned like the rest so that they are created with a known owner and mode rather
+    than as a side effect of whatever creates the first directory below them.
+    */
+    pub fn midnight_secret_directories(&self) -> Vec<PathBuf> {
         vec![
-            self.midnight_keys_dir.clone(),
+            self.secret_root.join("data"),
+            self.secret_root.join("data").join("chains"),
+            self.midnight_secret_chain_dir.clone(),
             self.midnight_network_dir.clone(),
             self.midnight_keystore_dir.clone(),
-            self.wireguard_data.clone(),
+            self.midnight_seed_dir.clone(),
         ]
     }
 
@@ -708,6 +755,7 @@ mod test {
             &paths.midnight_keys_dir,
             &paths.midnight_network_dir,
             &paths.midnight_keystore_dir,
+            &paths.midnight_seed_dir,
             &paths.midnight_env_file,
             &paths.postgres_credentials_file,
             &paths.wireguard_data,
@@ -724,16 +772,71 @@ mod test {
         assert!(paths.midnight_registration_file.starts_with("/data"));
     }
 
+    /// Each root stands in for the guides' `~`, with the guides' names below it
+    #[test]
+    fn follows_the_fno_guides_below_each_root() {
+        let paths = Paths::new("/data", "/secret", "preprod");
+
+        for (path, expected) in [
+            (paths.cardano_db.clone(), "/data/cardano-data/db"),
+            (
+                paths.cardano_socket.clone(),
+                "/data/cardano-data/db/node.socket",
+            ),
+            (paths.cardano_schema.clone(), "/data/cardano-data/schema"),
+            (
+                paths.cardano_db_sync_state.clone(),
+                "/data/cardano-data/db-sync-state",
+            ),
+            (
+                paths.cardano_db_sync_config.clone(),
+                "/data/cardano-data/db-sync-config.json",
+            ),
+            (paths.midnight_runtime_data.clone(), "/data/data"),
+            (
+                paths.midnight_chain_spec.clone(),
+                "/data/res/preprod/chain-spec-raw.json",
+            ),
+            (
+                paths.midnight_registration_file.clone(),
+                "/data/partner-chains-public-keys.json",
+            ),
+            (
+                paths.midnight_keys_dir.join("aura.json"),
+                "/secret/aura.json",
+            ),
+            (
+                paths.midnight_network_dir.join("secret_ed25519"),
+                "/secret/data/chains/midnight_preprod/network/secret_ed25519",
+            ),
+            (
+                paths.midnight_keystore_dir.clone(),
+                "/secret/data/chains/midnight_preprod/keystore",
+            ),
+            (paths.midnight_seed_dir.clone(), "/secret/keystore"),
+            (paths.midnight_env_file.clone(), "/secret/.env"),
+            (paths.postgres_pgpass_file.clone(), "/secret/.pgpass"),
+        ] {
+            assert_eq!(path, PathBuf::from(expected));
+        }
+    }
+
+    #[test]
+    fn mainnet_chain_data_is_plain_midnight() {
+        assert_eq!(midnight_chain_id("mainnet"), "midnight");
+        assert_eq!(midnight_chain_id("preprod"), "midnight_preprod");
+    }
+
     #[test]
     fn the_secret_root_moves_with_the_setting() {
         let paths = Paths::new("/data", "/mnt/keys", "preprod");
         assert_eq!(
             paths.midnight_keystore_dir,
-            PathBuf::from("/mnt/keys/keystore")
+            PathBuf::from("/mnt/keys/data/chains/midnight_preprod/keystore")
         );
         assert_eq!(
             paths.midnight_network_dir.join("secret_ed25519"),
-            PathBuf::from("/mnt/keys/node/secret_ed25519")
+            PathBuf::from("/mnt/keys/data/chains/midnight_preprod/network/secret_ed25519")
         );
     }
 

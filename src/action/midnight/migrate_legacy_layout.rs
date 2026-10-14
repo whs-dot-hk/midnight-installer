@@ -7,46 +7,43 @@ use crate::action::{planned, Action, ActionDescription, ActionState, StatefulAct
 use crate::settings::CommonSettings;
 use crate::util::{chown_recursive, gid_of, uid_of};
 
-const LEGACY_SEEDS: &[&str] = &["aura.seed", "grandpa.seed", "cross_chain.seed"];
-
 /** Carry an older layout's chain identity and seeds into the current paths
 
-Earlier revisions of this setup kept the Midnight chain data under `<data root>/midnight` and
-the seeds in a `seeds` directory. Generating a fresh identity instead of moving the old one
-would make the node a stranger to its peers, so anything found in the old places is copied
-into the new ones (never the other way round, and never overwriting).
+Earlier revisions of this setup kept the Midnight chain data under `<data root>/midnight`.
+Generating a fresh identity instead of moving the old one would make the node a stranger to
+its peers, so the chain data and the network key found there are copied into the new places
+(never the other way round, and never overwriting). The old `seeds` directory is not: the
+seed files are rebuilt from the key files by the `validator` stage.
 */
 #[derive(Debug, serde::Deserialize, serde::Serialize, Clone)]
 #[serde(tag = "action_name", rename = "migrate_legacy_layout")]
 pub struct MigrateLegacyLayout {
     user: String,
     legacy_chains: PathBuf,
-    legacy_seeds: PathBuf,
     runtime_chains: PathBuf,
     network_key: PathBuf,
     legacy_network_key: PathBuf,
-    keys_dir: PathBuf,
 }
 
 impl MigrateLegacyLayout {
     #[tracing::instrument(level = "debug", skip_all)]
     pub async fn plan(settings: &CommonSettings) -> anyhow::Result<StatefulAction<Self>> {
         let paths = settings.paths();
-        let legacy_chains = paths.midnight_data.join("chains");
+        let legacy_chains = paths.data_root.join("midnight").join("chains");
         let this = Self {
             user: settings.midnight_user.clone(),
             legacy_network_key: legacy_chains
-                .join(format!("midnight_{}", settings.cardano_network))
+                .join(crate::settings::midnight_chain_id(
+                    &settings.cardano_network,
+                ))
                 .join("network")
                 .join("secret_ed25519"),
             legacy_chains,
-            legacy_seeds: paths.midnight_node_data.join("seeds"),
             runtime_chains: paths.midnight_runtime_data.join("chains"),
             network_key: paths.midnight_network_dir.join("secret_ed25519"),
-            keys_dir: paths.midnight_keys_dir,
         };
 
-        let state = if this.legacy_chains.is_dir() || this.legacy_seeds.is_dir() {
+        let state = if this.legacy_chains.is_dir() {
             ActionState::Uncompleted
         } else {
             ActionState::Skipped
@@ -81,8 +78,9 @@ impl Action for MigrateLegacyLayout {
                     to = self.runtime_chains.display()
                 ),
                 format!(
-                    "Copy any seeds from `{}` into the keys directory",
-                    self.legacy_seeds.display()
+                    "Copy the network key from `{}` to `{}` if the new path has none",
+                    self.legacy_network_key.display(),
+                    self.network_key.display()
                 ),
             ],
         )]
@@ -93,11 +91,9 @@ impl Action for MigrateLegacyLayout {
         let Self {
             user,
             legacy_chains,
-            legacy_seeds,
             runtime_chains,
             network_key,
             legacy_network_key,
-            keys_dir,
         } = self;
 
         let uid = uid_of(user)?;
@@ -116,7 +112,10 @@ impl Action for MigrateLegacyLayout {
                 }
                 crate::util::copy_dir_all(legacy_chains, runtime_chains).await?;
                 chown_recursive(runtime_chains, Some(uid), gid)?;
-            } else if legacy_network_key.is_file() && !network_key.exists() {
+            }
+            // Whichever of the two ran: the node is pointed at the secret root's copy of the
+            // key, so the copy under the base path alone would still leave it a stranger
+            if legacy_network_key.is_file() && !network_key.exists() {
                 tracing::info!("Preserving the existing Midnight network key");
                 if let Some(parent) = network_key.parent() {
                     tokio::fs::create_dir_all(parent)
@@ -143,29 +142,6 @@ impl Action for MigrateLegacyLayout {
                 .with_context(|| {
                     format!("Setting mode `{:#o}` on `{}`", 0o600, network_key.display())
                 })?;
-            }
-        }
-
-        if legacy_seeds.is_dir() {
-            for seed in LEGACY_SEEDS {
-                let from = legacy_seeds.join(seed);
-                let to = keys_dir.join(seed);
-                if !from.is_file() || to.exists() {
-                    continue;
-                }
-
-                tracing::info!("Preserving the existing seed `{seed}`");
-                tokio::fs::copy(&from, &to).await.with_context(|| {
-                    format!("Copying `{}` to `{}`", from.display(), to.display())
-                })?;
-                nix::unistd::chown(to.as_path(), Some(uid), gid)
-                    .with_context(|| format!("Changing the owner of `{}`", to.display()))?;
-                tokio::fs::set_permissions(
-                    &to,
-                    std::os::unix::fs::PermissionsExt::from_mode(0o600),
-                )
-                .await
-                .with_context(|| format!("Setting mode `{:#o}` on `{}`", 0o600, to.display()))?;
             }
         }
 

@@ -106,8 +106,44 @@ $ sudo midnight-installer install cardano \
 The db-sync and validator stages need the PostgreSQL password. Set
 `MIDNIGHT_INSTALLER_POSTGRES_PASSWORD`, or let it ask at the terminal; `--postgres-password`
 also works, but a flag is visible in the process list and in `sudo`'s log. The db-sync stage
-saves it, root-only, at `<data root>/postgresql/fno-db-credentials.env`, and the validator
+saves it, root-only, at `<secret root>/fno-db-credentials.env`, and the validator
 stage reads it from there rather than asking again.
+
+## Where things go
+
+The files are the ones the FNO guides
+create, with the same names and the same paths relative to the service user's home. The
+difference is that `~` is split across two roots: `--data-root` (`/data`) for everything
+which can be rebuilt, and `--secret-root` (`/secret`) for everything which cannot. A
+command from the guides works with `~` replaced by the right root.
+
+| Guides | Here |
+| --- | --- |
+| `~/cardano-data/{db,schema,db-sync-state,db-sync-config.json}` | `/data/cardano-data/...` |
+| `~/data` (node base path), `~/res` | `/data/data`, `/data/res` |
+| `~/partner-chains-public-keys.json` | `/data/partner-chains-public-keys.json` |
+| `~/aura.json`, `~/grandpa.json`, `~/cross_chain.json` | `/secret/aura.json`, ... |
+| `~/data/chains/<chain>/network/secret_ed25519` | `/secret/data/chains/<chain>/network/secret_ed25519` |
+| `~/data/chains/<chain>/keystore` | `/secret/data/chains/<chain>/keystore` |
+| `~/keystore/<type><public key>` (`*_SEED_FILE`) | `/secret/keystore/<type><public key>` |
+| `~/.env`, `~/.pgpass` | `/secret/.env`, `/secret/.pgpass` |
+
+`<chain>` is `midnight` on mainnet and `midnight_preprod` on preprod. The binaries and the
+Cardano configuration stay in `~/.local/bin` and `~/.local/share`, as in the guides, and
+`~/res` links to `/data/res`. The WireGuard keypair and the saved database credentials,
+which the guides do not place, are `/secret/wireguard/{privatekey,publickey}` and
+`/secret/fno-db-credentials.env`.
+
+Two places where it departs from the guides' letter:
+
+- The seed files hold the bare secret phrase. They are named the way the keystore names its
+  entries, which is what the guides' `.env` shows, but they are not the keystore's own files:
+  those hold the phrase as a quoted JSON string, which the node does not unquote when it reads
+  a seed file. The type in each name is the one the node files the seed under: `aura`
+  (`61757261`), `gran` (`6772616e`) and `crch` (`63726368`). The guides' example labels
+  GRANDPA and CROSS_CHAIN with each other's prefixes.
+- The network key and the keystore are under the secret root rather than the base path, so
+  the unit names them with `--node-key-file` and `--keystore-path`.
 
 ## Releases and checksums
 
