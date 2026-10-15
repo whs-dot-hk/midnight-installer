@@ -7,6 +7,9 @@ with its validator keys, the WireGuard identity, and finally the node running as
 The steps are the ones the FNO runbook prescribes, in the same order — but as plans that can
 be inspected before they run, and receipts that can undo them afterwards.
 
+It can also run a **devnet** of your own — a Midnight chain with its own validators, on one
+host or many, reached over SSH. See [Devnets](#devnets).
+
 ## Why it is shaped this way
 
 The machinery is the [`installer`](https://github.com/swimming-bookstore/installer)
@@ -234,6 +237,117 @@ a short-lived root-only file rather than a flag; and a command which carries a s
 environment or prints one on stdout is run by a helper which never logs either. When the
 installer re-runs itself under `sudo`, its `MIDNIGHT_INSTALLER_*` variables are carried
 across by name (`--preserve-env`), never as `KEY=VALUE` arguments `sudo` would log.
+
+## Devnets
+
+`midnight-installer devnet` runs a Midnight chain of its own over SSH: its validators are the
+ones you list, its main chain is the node's built-in mock follower rather than Cardano, and it
+can be torn down and rebuilt at will. It runs from your machine, which needs only to reach the
+hosts, and installs nothing there.
+
+Describe the devnet in a TOML file. One host:
+
+```toml
+chain = "devnet"
+
+[ssh]
+kind = "gcloud"               # `gcloud compute ssh`, through an IAP tunnel
+project = "my-project"
+zone = "europe-west1-b"
+
+[[hosts]]
+name = "devnet-0"
+validators = ["alice", "bob", "charlie"]
+```
+
+Several hosts: list each, with the nodes it runs. Node names are devnet-wide.
+
+```toml
+[[hosts]]
+name = "devnet-0"
+validators = ["alice", "bob"]
+
+[[hosts]]
+name = "devnet-1"
+validators = ["charlie"]
+full_nodes = ["archive"]
+```
+
+```console
+# The hosts run this installer too, uploaded by `up`, so it has to be a static build
+$ cargo build --release --target x86_64-unknown-linux-musl
+$ BIN=target/x86_64-unknown-linux-musl/release/midnight-installer
+
+$ $BIN devnet up devnet.toml        # install, generate keys, build the genesis, start
+$ $BIN devnet status devnet.toml    # each node's service, best and finalized block, peers
+$ $BIN devnet down devnet.toml      # stop everything, delete keys and chain data
+```
+
+(`ring`, through `rustls`, compiles some C: if the musl build cannot find
+`x86_64-linux-musl-gcc`, set `CC_x86_64_unknown_linux_musl=gcc`.)
+
+`up` runs in four steps, and is safe to run again:
+
+1. **On every host at once:** upload this installer, and run the `devnet-keys` stage with it.
+   That installs the pinned `midnight-node` release (checksum-verified, `1.0.400` by default)
+   and generates each node's keys **on the host**: seeds never leave it. Only each node's
+   `public.json` — public keys and peer id — is read back.
+2. **On this machine:** assemble the genesis committee from every validator, in the order
+   the file lists them.
+3. **On the first host:** run `devnet-nodes`, which builds the chain spec from the release's
+   `dev` preset with that committee, writes a systemd unit per node, and starts them.
+4. **On every other host at once:** hand it the first host's chain spec, byte for byte, and
+   run `devnet-nodes` there.
+
+The first host's first node is the bootnode every other node dials. Each node's ports are the
+base port (`[ports]`: `p2p = 30333`, `rpc = 9944`, `prometheus = 9615`) plus its index on
+its host. RPC and Prometheus stay local to each host.
+
+Running `up` again keeps every key, and keeps the chain spec as long as the committee is the
+same. A changed committee means a new genesis, so the nodes' chain data is deleted with the
+old one.
+
+| On each host | |
+| --- | --- |
+| `<root>/<chain>/release/` | `midnight-node` and its `res/` (`root` defaults to `/var/lib/midnight-devnet`) |
+| `<root>/<chain>/nodes/<node>/secrets/` | The seeds, mode `700`, as the node's user |
+| `<root>/<chain>/nodes/<node>/{node.key,public.json,node.env,data}` | |
+| `<root>/<chain>/chain-spec.json`, `committee.json`, `mock-registrations.json` | The genesis |
+| `<root>/<chain>/receipts/` | Receipts of `devnet-keys` and `devnet-nodes` |
+| `midnight-devnet-<chain>-<node>.service` | One unit per node |
+
+Only the first host's first node has to be reachable from the others, on its p2p port: every
+other node dials it, and libp2p carries everything both ways over that connection. Where a
+firewall opens just one port (say `30333`), give the first host that port and the others any
+free ones:
+
+```toml
+[[hosts]]
+name = "devnet-1"
+validators = ["charlie"]
+
+[hosts.ports]               # this host only; the rest of [ports] still applies
+p2p = 31333
+rpc = 10944
+prometheus = 10615
+```
+
+Other settings, all optional: `version` and `sha256` (another release), `slots_per_epoch`
+(`10`), `user` (`midnight`; it must exist on every host), `root`, `[ports]`, and per host
+`zone` and `address` (the address the others dial; by default the host's first). With
+`kind = "ssh"`, `name` is an `ssh` destination and `options` adds flags to `ssh` and `scp`:
+
+```toml
+[ssh]
+kind = "ssh"
+options = ["-i", "~/.ssh/devnet"]
+
+[[hosts]]
+name = "ubuntu@10.0.0.5"
+validators = ["alice"]
+```
+
+Two devnets can share hosts if they have different `chain` names and port ranges.
 
 ## Development
 

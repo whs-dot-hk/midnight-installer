@@ -57,10 +57,7 @@ impl CommandExecute for Uninstall {
         let receipt_path = match (receipt, stage) {
             (Some(receipt), _) => receipt,
             (None, Some(stage)) => {
-                let path = stage
-                    .common_settings()
-                    .paths()
-                    .receipt(stage.typetag_name());
+                let path = stage.receipt_path();
                 // The framework reports a missing receipt too, but it cannot know the one
                 // thing an operator here most often has wrong: the stage was installed as
                 // part of `all`, whose receipt is the one to follow

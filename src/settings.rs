@@ -57,6 +57,11 @@ const KNOWN_SHA256: &[(&str, &str)] = &[
         "https://github.com/midnightntwrk/midnight-node/releases/download/node-0.22.2/midnight-node-0.22.2-linux-amd64.tar.gz",
         "e3cdf87a9125c4aede2151fdd5dc12a04d34e13390ae10393904be1a33ccf640",
     ),
+    // The release a devnet runs by default (`devnet::DEFAULT_DEVNET_VERSION`)
+    (
+        "https://github.com/midnightntwrk/midnight-node/releases/download/node-1.0.400/midnight-node-1.0.400-linux-amd64.tar.gz",
+        "8098481824fa511d0a37554e44eaca524f5c74bced1885e5224cd90c0761914c",
+    ),
 ];
 
 pub const DEFAULT_DB_NAME: &str = "cexplorer";
@@ -296,14 +301,7 @@ impl CommonSettings {
             );
         }
 
-        released_archive(
-            format!(
-                "https://github.com/midnightntwrk/midnight-node/releases/download/node-{version}/midnight-node-{version}-linux-amd64.tar.gz",
-                version = self.midnight_version,
-            ),
-            self.midnight_sha256.as_deref(),
-            "midnight-sha256",
-        )
+        midnight_release(&self.midnight_version, self.midnight_sha256.as_deref())
     }
 
     pub fn db_sync_config_url(&self) -> anyhow::Result<Url> {
@@ -437,6 +435,21 @@ built against. A version this installer does not know, with no checksum given, i
 rather than installed unverified.
 */
 pub use installer::action::base::{ArchiveSource, ReleaseArchive};
+
+/// The published `midnight-node` release for `version`, verified against `sha256` or, for a
+/// version this installer knows, the checksum the project published for it
+pub(crate) fn midnight_release(
+    version: &str,
+    sha256: Option<&str>,
+) -> anyhow::Result<ReleaseArchive> {
+    released_archive(
+        format!(
+            "https://github.com/midnightntwrk/midnight-node/releases/download/node-{version}/midnight-node-{version}-linux-amd64.tar.gz",
+        ),
+        sha256,
+        "midnight-sha256",
+    )
+}
 
 /// A published release, downloaded from its URL
 fn released_archive(

@@ -47,6 +47,7 @@ pub mod action;
 pub mod check;
 pub mod cli;
 pub mod credentials;
+pub mod devnet;
 pub mod planner;
 pub mod settings;
 pub mod status;

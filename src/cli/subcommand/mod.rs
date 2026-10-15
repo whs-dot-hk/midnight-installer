@@ -1,3 +1,4 @@
+pub(crate) mod devnet;
 pub(crate) mod install;
 pub(crate) mod plan;
 pub(crate) mod status;
@@ -13,4 +14,6 @@ pub enum MidnightInstallerSubcommand {
     Uninstall(uninstall::Uninstall),
     /// Report where this host has got to
     Status(status::Status),
+    /// Run a devnet of your own on one or more hosts, over SSH
+    Devnet(devnet::Devnet),
 }
