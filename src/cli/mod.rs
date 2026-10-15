@@ -50,6 +50,7 @@ impl CommandExecute for MidnightInstallerCli {
             MidnightInstallerSubcommand::Install(install) => install.execute().await,
             MidnightInstallerSubcommand::Uninstall(uninstall) => uninstall.execute().await,
             MidnightInstallerSubcommand::Status(status) => status.execute().await,
+            MidnightInstallerSubcommand::Devnet(devnet) => devnet.execute().await,
         }
     }
 }

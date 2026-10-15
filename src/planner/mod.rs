@@ -22,13 +22,12 @@ to [`status`](crate::status).
 pub mod all;
 pub mod cardano;
 pub mod db_sync;
+pub mod devnet;
 pub mod directories;
 pub mod midnight;
 pub mod units;
 pub mod validator;
 pub mod wireguard;
-
-use crate::settings::CommonSettings;
 
 pub use installer::planner::{diff_from_default, Planner};
 
@@ -101,18 +100,27 @@ pub enum BuiltinPlanner {
     Wireguard(wireguard::Wireguard),
     /// The Midnight node in validator mode (needs the `midnight` stage)
     Validator(validator::Validator),
+    /// A devnet host: the node release and its nodes' keys (run by `devnet up`)
+    #[command(hide = true)]
+    DevnetKeys(devnet::DevnetKeys),
+    /// A devnet host: the genesis and the nodes' services (run by `devnet up`)
+    #[command(hide = true)]
+    DevnetNodes(devnet::DevnetNodes),
 }
 
 impl BuiltinPlanner {
-    pub fn common_settings(&self) -> &CommonSettings {
+    /// Where this planner's receipt is written, and where `uninstall` looks for it
+    pub fn receipt_path(&self) -> std::path::PathBuf {
         match self {
-            Self::All(planner) => planner.common(),
-            Self::Directories(planner) => &planner.common,
-            Self::Cardano(planner) => &planner.common,
-            Self::DbSync(planner) => &planner.common,
-            Self::Midnight(planner) => &planner.common,
-            Self::Wireguard(planner) => &planner.common,
-            Self::Validator(planner) => &planner.common,
+            Self::All(planner) => planner.receipt_path(),
+            Self::Directories(planner) => planner.receipt_path(),
+            Self::Cardano(planner) => planner.receipt_path(),
+            Self::DbSync(planner) => planner.receipt_path(),
+            Self::Midnight(planner) => planner.receipt_path(),
+            Self::Wireguard(planner) => planner.receipt_path(),
+            Self::Validator(planner) => planner.receipt_path(),
+            Self::DevnetKeys(planner) => planner.receipt_path(),
+            Self::DevnetNodes(planner) => planner.receipt_path(),
         }
     }
 
@@ -126,6 +134,8 @@ impl BuiltinPlanner {
             Self::Midnight(planner) => planner.typetag_name(),
             Self::Wireguard(planner) => planner.typetag_name(),
             Self::Validator(planner) => planner.typetag_name(),
+            Self::DevnetKeys(planner) => planner.typetag_name(),
+            Self::DevnetNodes(planner) => planner.typetag_name(),
         }
     }
 }
@@ -146,6 +156,8 @@ macro_rules! with_planner {
             $crate::planner::BuiltinPlanner::Midnight($bound) => $body,
             $crate::planner::BuiltinPlanner::Wireguard($bound) => $body,
             $crate::planner::BuiltinPlanner::Validator($bound) => $body,
+            $crate::planner::BuiltinPlanner::DevnetKeys($bound) => $body,
+            $crate::planner::BuiltinPlanner::DevnetNodes($bound) => $body,
         }
     };
 }

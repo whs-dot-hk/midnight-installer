@@ -21,6 +21,7 @@ can fail halfway and needs undoing on its own belongs in its own action.
 
 pub mod cardano;
 pub mod dbsync;
+pub mod devnet;
 pub mod midnight;
 pub mod postgres;
 pub mod wireguard;
