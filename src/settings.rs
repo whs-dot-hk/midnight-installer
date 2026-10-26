@@ -566,7 +566,7 @@ a command from the guides works here with `~` replaced by the right root.
 
 ```text
 <data root>/cardano-data/{db,schema,db-sync-state,db-sync-config.json}   ~/cardano-data
-<data root>/data                       node base path                    ~/data
+<data root>/midnight-data             node base path                    ~/data
 <data root>/res                        chain configuration               ~/res
 <data root>/partner-chains-public-keys.json                              ~/partner-chains-public-keys.json
 <secret root>/{aura,grandpa,cross_chain}.json                            ~/aura.json ...
@@ -651,7 +651,7 @@ impl Paths {
             midnight_work_dir: data_root.clone(),
             midnight_keys_dir: secret_root.clone(),
             midnight_registration_file: data_root.join("partner-chains-public-keys.json"),
-            midnight_runtime_data: data_root.join("data"),
+            midnight_runtime_data: data_root.join("midnight-data"),
             midnight_network_dir: midnight_secret_chain_dir.join("network"),
             midnight_keystore_dir: midnight_secret_chain_dir.join("keystore"),
             midnight_seed_dir: secret_root.join("keystore"),
@@ -805,7 +805,7 @@ mod test {
                 paths.cardano_db_sync_config.clone(),
                 "/data/cardano-data/db-sync-config.json",
             ),
-            (paths.midnight_runtime_data.clone(), "/data/data"),
+            (paths.midnight_runtime_data.clone(), "/data/midnight-data"),
             (
                 paths.midnight_chain_spec.clone(),
                 "/data/res/preprod/chain-spec-raw.json",

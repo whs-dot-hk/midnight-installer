@@ -123,7 +123,7 @@ command from the guides works with `~` replaced by the right root.
 | Guides | Here |
 | --- | --- |
 | `~/cardano-data/{db,schema,db-sync-state,db-sync-config.json}` | `/data/cardano-data/...` |
-| `~/data` (node base path), `~/res` | `/data/data`, `/data/res` |
+| `~/data` (node base path), `~/res` | `/data/midnight-data`, `/data/res` |
 | `~/partner-chains-public-keys.json` | `/data/partner-chains-public-keys.json` |
 | `~/aura.json`, `~/grandpa.json`, `~/cross_chain.json` | `/secret/aura.json`, ... |
 | `~/data/chains/<chain>/network/secret_ed25519` | `/secret/data/chains/<chain>/network/secret_ed25519` |
