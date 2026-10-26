@@ -9,11 +9,12 @@ use crate::util::{chown_recursive, gid_of, uid_of};
 
 /** Carry an older layout's chain identity and seeds into the current paths
 
-Earlier revisions of this setup kept the Midnight chain data under `<data root>/midnight`.
-Generating a fresh identity instead of moving the old one would make the node a stranger to
-its peers, so the chain data and the network key found there are copied into the new places
-(never the other way round, and never overwriting). The old `seeds` directory is not: the
-seed files are rebuilt from the key files by the `validator` stage.
+Earlier revisions of this setup kept the Midnight chain data under `<data root>/midnight`,
+and then under `<data root>/data`. Generating a fresh identity instead of moving the old one
+would make the node a stranger to its peers, so the chain data and the network key found
+there are copied into the new places (never the other way round, and never overwriting). The
+old `seeds` directory is not: the seed files are rebuilt from the key files by the
+`validator` stage.
 */
 #[derive(Debug, serde::Deserialize, serde::Serialize, Clone)]
 #[serde(tag = "action_name", rename = "migrate_legacy_layout")]
@@ -29,7 +30,7 @@ impl MigrateLegacyLayout {
     #[tracing::instrument(level = "debug", skip_all)]
     pub async fn plan(settings: &CommonSettings) -> anyhow::Result<StatefulAction<Self>> {
         let paths = settings.paths();
-        let legacy_chains = paths.data_root.join("midnight").join("chains");
+        let legacy_chains = legacy_chains_dir(&paths);
         let this = Self {
             user: settings.midnight_user.clone(),
             legacy_network_key: legacy_chains
@@ -51,6 +52,19 @@ impl MigrateLegacyLayout {
 
         Ok(planned(this, state))
     }
+}
+
+/// Where an earlier layout left `chains/`, if it left one
+///
+/// `<data root>/midnight` came first. The next layout used `<data root>/data`, which is also
+/// where the node keeps its keystore under the secret root, so that name is only legacy when
+/// it is the data root.
+fn legacy_chains_dir(paths: &crate::settings::Paths) -> PathBuf {
+    let under_midnight = paths.data_root.join("midnight").join("chains");
+    if under_midnight.is_dir() {
+        return under_midnight;
+    }
+    paths.data_root.join("data").join("chains")
 }
 
 #[async_trait::async_trait]
